@@ -2,3 +2,4 @@ setuptools~=65.5.0
 numpy
 nussl
 scipy
+sox
