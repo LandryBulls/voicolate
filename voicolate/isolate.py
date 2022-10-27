@@ -2,6 +2,7 @@ import numpy as np
 import nussl
 from scipy.io import wavfile
 from scipy.ndimage import gaussian_filter
+import os
 
 def apply_wiener(file_list, iterations=10, save_to_file=False, output_path = None, return_outputs=True):
     """
@@ -34,6 +35,30 @@ def window_rms(a, rate=44100, window_ms=10):
     window = np.ones(window_size)/float(window_size)
     return np.sqrt(np.convolve(a2, window, 'same'))
 
+def mask(input_arr, threshold=0.001, sigma=20, rate=44100, window_ms=10, return_mask=False):
+    """
+
+    :param input_arr: Array representing audio.
+    :type input_arr: np.1darray
+    :param threshold: RMS value below which values will be zero'd.
+    :param sigma: Sigma value for gaussian filter (higher values = more fade)
+    :param rate: Hz of the input audio
+    :param window_ms: Window width in ms for getting rms values
+    :param return_mask: Whether or not to return the mask used to silence non-partipant speech.
+    :type return_mask: bool
+    :return: Masked audio (or audio along with mask if return_mask=True
+    """
+    loud = window_rms(input_arr, rate=rate, window_ms=window_ms)
+    # smooth in and outs to reduce choppiness
+    loud[np.where(loud != 1)] = gaussian_filter(loud, sigma)[np.where(loud != 1)]
+    loud[np.where(loud < threshold)] = 0
+    loud[np.where(loud > threshold)] = 1
+    clean = loud*input_arr
+    if not return_mask:
+        return clean
+    else:
+        return clean, loud
+
 def mask_audio(wiener_outputs, raw_audio, rate=44100, window_ms=10, stride_ms=2, threshold=0.001, sigma=20):
     """
     Gets RMS of Wiener-filtered audio and uses it to mask the original audio to retain quality.
@@ -60,7 +85,7 @@ def save_audio(array_list, rate=44100, output_path = None, output_name=None):
     for f, array in enumerate(array_list):
         wavfile.write(os.path.join(output_path, outnames[f]), rate, array)
 
-def isolate_audio(file_list, rate=44100, save_files=False, output_path=None):
+def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_files=False, output_path=None):
     """
     Uses RMS values from Wiener-filtered audio to remove interference. Input is a list of audio files
     Returns numpy vectors representing the cleaned sound.
@@ -69,7 +94,7 @@ def isolate_audio(file_list, rate=44100, save_files=False, output_path=None):
     wiener_outputs = apply_wiener(file_list)
     raw_audio = [nussl.AudioSignal(f).audio_data[0] for f in file_list]
     print('Masking...')
-    masked_audio = mask_audio(wiener_outputs, raw_audio, rate=rate)
+    masked_audio = mask_audio(wiener_outputs, raw_audio, threshold=threshold, sigma=sigma, rate=rate)
     if save_files:
         save_audio(masked_audio, rate, output_path)
     return masked_audio
