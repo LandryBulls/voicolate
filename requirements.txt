@@ -3,3 +3,4 @@ numpy
 nussl
 scipy
 sox
+transformers

@@ -4,24 +4,55 @@ from scipy.io import wavfile
 from scipy.ndimage import gaussian_filter
 import os
 
-def apply_wiener(file_list, iterations=10, save_to_file=False, output_path = None, return_outputs=True):
+def arr_to_batch(array, batch_size):
+    shape = array.shape[1]
+    n_batches = shape // batch_size
+    leftover = shape - batch_size*n_batches
+    batches = []
+    b = 0
+    for batch in range(n_batches):
+        batches.append(array[:,b:b+batch_size])
+        b+=batch_size
+    if leftover:
+        batches.append(array[:,b:b+leftover])
+    return batches
+
+def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None, return_outputs=True,
+                 batch_size=441000):
     """
     Takes list of .wav files and returns filtered audio.
+    Assumes all audio files are mono and of the *exact* same length
     """
     naud = len(file_list)
     estimates = [nussl.AudioSignal(i) for i in file_list]
-    mix = np.zeros(estimates[0].audio_data.shape)
-    for i in range(naud):
-        mix += estimates[i].audio_data
-    mix = nussl.core.AudioSignal(audio_data_array=mix,sample_rate=estimates[0].sample_rate)
-    wiener  = nussl.separation.benchmark.WienerFilter(mix, estimates, iterations=iterations)
-    wout = wiener()
-    outputs = [i.audio_data[0] for i in wout]
+    rate = estimates[0].sample_rate
+    shape = estimates[0].audio_data.shape[0]
+
+    if not all([estimates[i].audio_data.shape for i in range(naud)]):
+        raise Exception("Audio files are of different lengths!")
+
+    batches = arr_to_batch(np.array([estimates[i].audio_data[0] for i in range(naud)]), batch_size=batch_size)
+    print(len(batches))
+
+    outs = []
+
+    print("Applying Wiener...\n")
+    for batch in tqdm(batches):
+        mix = np.mean(batch, axis=0)
+        mix = nussl.core.AudioSignal(audio_data_array=mix, sample_rate=rate)
+        wiener = nussl.separation.benchmark.WienerFilter(mix,
+                                                         [nussl.core.AudioSignal(audio_data_array=i, sample_rate=rate)
+                                                          for i in batch], iterations=iterations)
+        wout = wiener()
+        outs.append(np.array([i.audio_data[0] for i in wout]))
+
+    outs = np.concatenate(outs, axis=1)
+
     if save_to_file:
-        if output_path==None:
+        if output_path == None:
             output_path = os.path.getcwd()
         for f, file in enumerate(file_list):
-            out = os.path.join(output_path, os.path.basename(file)[:-4]+'_wiener.wav')
+            out = os.path.join(output_path, os.path.basename(file)[:-4] + '_wiener.wav')
             wavfile.write(out, estimates[0].sample_rate, outputs[f])
     if return_outputs:
         return outputs
