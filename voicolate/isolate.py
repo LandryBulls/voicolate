@@ -32,7 +32,6 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
         raise Exception("Audio files are of different lengths!")
 
     batches = arr_to_batch(np.array([estimates[i].audio_data[0] for i in range(naud)]), batch_size=batch_size)
-    print(len(batches))
 
     outs = []
 
@@ -55,7 +54,7 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
             out = os.path.join(output_path, os.path.basename(file)[:-4] + '_wiener.wav')
             wavfile.write(out, estimates[0].sample_rate, outputs[f])
     if return_outputs:
-        return outputs
+        return outs
 
 def window_rms(a, rate=44100, window_ms=10):
     """
