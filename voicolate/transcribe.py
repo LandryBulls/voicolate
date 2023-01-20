@@ -1,0 +1,20 @@
+import os
+import glob
+import whisperx
+import torch
+
+if torch.cuda.is_available():
+    device = 'cuda'
+else:
+    device = 'cpu'
+
+model = whisperx.load_model("large", device)
+model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
+
+def transcribe(audio):
+    # WhisperX handles audio parameter so that it can be a path (str), np.ndarray, or torch.tensor
+    result = model.transcribe(audio)
+    model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
+    # align whisper output
+    result_aligned = whisperx.align(result["segments"], model_a, metadata, audio_file, device)
+    return result_aligned['segments']
