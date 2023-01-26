@@ -2,6 +2,5 @@ setuptools~=65.5.0
 numpy
 nussl
 scipy
-#sox
 transformers
 whisperx @ git+https://github.com/m-bain/whisperx.git
