@@ -125,7 +125,7 @@ def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_fi
     wiener_outputs = apply_wiener(file_list)
     raw_audio = [nussl.AudioSignal(f).audio_data[0] for f in file_list]
     print('Masking...')
-    masked_audio = mask_audio(wiener_outputs, raw_audio, threshold=threshold, sigma=sigma, rate=rate)
+    masked_audio = mask_audio(wiener_outputs, raw_audio, threshold=mask_threshold, sigma=sigma, rate=rate)
     if save_files:
         save_audio(masked_audio, rate, output_path)
     return masked_audio
