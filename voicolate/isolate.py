@@ -3,6 +3,7 @@ import nussl
 from scipy.io import wavfile
 from scipy.ndimage import gaussian_filter
 import os
+from tqdm import tqdm
 
 def arr_to_batch(array, batch_size):
     shape = array.shape[1]
