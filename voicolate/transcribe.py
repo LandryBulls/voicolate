@@ -15,5 +15,5 @@ def transcribe(audio):
     result = model.transcribe(audio)
     model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
     # align whisper output
-    result_aligned = whisperx.align(result["segments"], model_a, metadata, audio_file, device)
+    result_aligned = whisperx.align(result["segments"], model_a, metadata, audio, device)
     return result_aligned['segments']

@@ -96,7 +96,7 @@ def mask_audio(wiener_outputs, raw_audio, rate=44100, window_ms=10, stride_ms=2,
     A gaussian filter is used to smooth in and out phases of speech to reduce choppiness.
     """
     cleaned_outputs = []
-    for w, wout in enumerate(wiener_outputs):
+    for w, wout in tqdm(enumerate(wiener_outputs)):
         loud = window_rms(wout)
         #smooth in and outs to reduce choppiness
         loud[np.where(loud!=1)] = gaussian_filter(loud, sigma)[np.where(loud!=1)]
@@ -121,10 +121,10 @@ def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_fi
     Uses RMS values from Wiener-filtered audio to remove interference. Input is a list of audio files
     Returns numpy vectors representing the cleaned sound.
     """
-    print('Applying Wiener Filter, may take a while...')
+    print('Applying Wiener Filter, may take a while...\n')
     wiener_outputs = apply_wiener(file_list)
     raw_audio = [nussl.AudioSignal(f).audio_data[0] for f in file_list]
-    print('Masking...')
+    print('Masking...\n')
     masked_audio = mask_audio(wiener_outputs, raw_audio, threshold=mask_threshold, sigma=sigma, rate=rate)
     if save_files:
         save_audio(masked_audio, rate, output_path)
