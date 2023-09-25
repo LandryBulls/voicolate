@@ -1,5 +1,3 @@
-import os
-import glob
 import whisperx
 import torch
 
