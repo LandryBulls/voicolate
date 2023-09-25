@@ -18,6 +18,15 @@ def arr_to_batch(array, batch_size):
         batches.append(array[:,b:b+leftover])
     return batches
 
+def additive_mix(audio_iter):
+    """
+    Takes an iterable of audio files and returns their sum.
+    """
+    mix = np.zeros(len(audio_iter[0]))
+    for audio in audio_iter:
+        mix += audio
+    return mix
+
 def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None, return_outputs=True,
                  batch_size=441000):
     """
@@ -32,13 +41,14 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
     if not all([estimates[i].audio_data.shape for i in range(naud)]):
         raise Exception("Audio files are of different lengths!")
 
+    # this could be one problem
     batches = arr_to_batch(np.array([estimates[i].audio_data[0] for i in range(naud)]), batch_size=batch_size)
 
     outs = []
 
     print("Applying Wiener...\n")
     for batch in tqdm(batches):
-        mix = np.mean(batch, axis=0)
+        mix = additive_mix(batch)
         mix = nussl.core.AudioSignal(audio_data_array=mix, sample_rate=rate)
         wiener = nussl.separation.benchmark.WienerFilter(mix,
                                                          [nussl.core.AudioSignal(audio_data_array=i, sample_rate=rate)
@@ -53,7 +63,7 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
             output_path = os.path.getcwd()
         for f, file in enumerate(file_list):
             out = os.path.join(output_path, os.path.basename(file)[:-4] + '_wiener.wav')
-            wavfile.write(out, estimates[0].sample_rate, outputs[f])
+            wavfile.write(out, estimates[0].sample_rate, outs[f])
     if return_outputs:
         return outs
 
