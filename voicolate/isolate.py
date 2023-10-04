@@ -116,15 +116,20 @@ def mask_audio(wiener_outputs, raw_audio, rate=44100, window_ms=10, stride_ms=2,
         cleaned_outputs.append(clean)
     return cleaned_outputs
 
-def save_audio(array_list, rate=44100, output_path = None, output_name=None):
+def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=None):
     if not output_name:
         outnames = [str(i)+'_isolated.wav' for i in range(len(array_list))]
     else:
         outnames = [output_name+'_'+str(i)+'.wav' for i in range(len(array_list))]
     if not output_path:
         output_path = os.getcwd()
+
+    filenames = [os.path.join(output_path, outnames[i]) for i in range(len(array_list))]
+
     for f, array in enumerate(array_list):
-        wavfile.write(os.path.join(output_path, outnames[f]), rate, array)
+        wavfile.write(filenames[f], rate, array)
+
+    return filenames
 
 def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_files=False, output_path=None):
     """
@@ -137,6 +142,11 @@ def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_fi
     print('Masking...\n')
     masked_audio = mask_audio(wiener_outputs, raw_audio, threshold=mask_threshold, sigma=sigma, rate=rate)
     if save_files:
-        save_audio(masked_audio, rate, output_path)
-    return masked_audio
+        # check if output path exists. If not, make it.
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        saved_files = save_isolated_audio(masked_audio, rate, output_path)
+        return saved_files
+    else:
+        return masked_audio
 

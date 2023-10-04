@@ -1,5 +1,6 @@
 import whisperx
 import torch
+import librosa
 
 if torch.cuda.is_available():
     device = 'cuda'
