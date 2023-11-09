@@ -1,4 +1,4 @@
-from voicolate import isolate
+#from voicolate import isolate, transcribe
 import sys
 import os
 
