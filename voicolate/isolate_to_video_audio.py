@@ -19,6 +19,21 @@ def extract_audio(posix_video_path):
     # returns both the audio as a numpy array and the sample rate (arr, sr)
     return loaded
 
+# get audio files of all the video files given data dir
+def get_video_audio_files(data_dir):
+    # assumes files are already trimmed and concatenated
+    data_dir = Path(data_dir)
+    derivative_path = data_dir / 'derivatives'
+    video_files = [str(i) for i in derivative_path.iterdir() if Path(i).suffix == '.mp4']
+    video_files = [i for i in video_files if 'concatenated_trimmed' in i]
+    video_audio_files = [extract_audio(i) for i in video_files]
+    # check if all the same sample rate
+    if len(set([i[1] for i in video_audio_files])) > 1 or any([i[1] != 44100 for i in video_audio_files]):
+        print(f'Video audio files for {data_dir} are not all the same sample rate. Resampling...')
+        # resample
+        video_audio_files = [librosa.resample(i[0], i[1], 44100) for i in video_audio_files if i[1] != 44100]
+    return video_audio_files
+
 def arr_to_batch(array, batch_size):
     shape = array.shape[1]
     n_batches = shape // batch_size
@@ -36,6 +51,17 @@ def additive_mix(audio_iter):
     """
     Takes an iterable of audio files and returns their sum.
     """
+    # get shapes of all audio files
+    shapes = [audio.shape for audio in audio_iter]
+    # get the maximum shape
+    max_shape = max(shapes)
+    # print a warning if any shape is less than 99% of the max shape
+    for shape in shapes:
+        if shape[0] < max_shape[0]*.99:
+            print("Warning: audio file is less than 99% of the max shape.")
+    # pad all audio files to the max shape
+    audio_iter = [np.pad(arr, (0, max_shape-len(arr)), 'constant') for arr in audio_iter]
+
     mix = np.zeros(len(audio_iter[0]))
     for audio in audio_iter:
         mix += audio
@@ -180,13 +206,16 @@ def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=
 
     return filenames
 
-def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_files=False, output_path=None):
+def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_files=False, output_path=None, video_file_list=None):
     """
     Uses RMS values from Wiener-filtered audio to remove interference. Input is a list of audio files
     Returns numpy vectors representing the cleaned sound.
     """
     print('Applying Wiener Filter, may take a while...\n')
-    wiener_outputs = apply_wiener(file_list)
+    if video_file_list:
+        wiener_outputs = apply_wiener(file_list, video_file_list=video_file_list)
+    else:
+        wiener_outputs = apply_wiener(file_list)
     raw_audio = [nussl.AudioSignal(f).audio_data[0] for f in file_list]
     print('Masking...\n')
     masked_audio = mask_audio(wiener_outputs, raw_audio, threshold=mask_threshold, sigma=sigma, rate=rate)
