@@ -1,7 +1,7 @@
 import numpy as np
 import nussl
 from scipy.io import wavfile
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, binary_dilation
 import os
 from tqdm import tqdm
 
@@ -76,45 +76,61 @@ def window_rms(a, rate=44100, window_ms=10):
     window = np.ones(window_size)/float(window_size)
     return np.sqrt(np.convolve(a2, window, 'same'))
 
-def mask(input_arr, threshold=0.001, sigma=20, rate=44100, window_ms=10, return_mask=False):
+def mask(wiener_output, raw_audio, sigma=100, rate=44100, window_ms=10, widen_ms=100, percentile=75, return_mask=False):
     """
+    Modified masking function to preserve mask values after smoothing
+    """
+    # print all the parameters
+    print(f'sigma: {sigma}, rate: {rate}, window_ms: {window_ms}, widen_ms: {widen_ms}, percentile: {percentile}')
 
-    :param input_arr: Array representing audio.
-    :type input_arr: np.1darray
-    :param threshold: RMS value below which values will be zero'd.
-    :param sigma: Sigma value for gaussian filter (higher values = more fade)
-    :param rate: Hz of the input audio
-    :param window_ms: Window width in ms for getting rms values
-    :param return_mask: Whether or not to return the mask used to silence non-partipant speech.
-    :type return_mask: bool
-    :return: Masked audio (or audio along with mask if return_mask=True
-    """
-    loud = window_rms(input_arr, rate=rate, window_ms=window_ms)
-    # smooth in and outs to reduce choppiness
-    loud[np.where(loud != 1)] = gaussian_filter(loud, sigma)[np.where(loud != 1)]
-    loud[np.where(loud < threshold)] = 0
-    loud[np.where(loud > threshold)] = 1
-    clean = loud*input_arr
-    if not return_mask:
-        return clean
+
+    # get widen_ms in samples
+    widen_samples = int((widen_ms / 1000) * rate)
+    # create dilation structure
+    dilate_struct = np.ones(widen_samples)
+
+    # get rms
+    rms = window_rms(wiener_output, rate=rate, window_ms=window_ms)
+    
+    # get percentile rms
+    rms_percentile = np.percentile(rms, percentile)
+    
+    # generate mask
+    mask = np.ones_like(rms)
+    mask[rms < rms_percentile] = 0
+    
+    # Apply dilation
+    mask = binary_dilation(mask, structure=dilate_struct)
+    
+    # Apply gaussian filter with proper scaling
+    # Use mode='reflect' to handle edges better
+    smoothed_mask = gaussian_filter(mask.astype(float), sigma=sigma, mode='reflect')
+    
+    # Rescale the smoothed mask to [0,1] range
+    smoothed_mask = (smoothed_mask - smoothed_mask.min()) / (smoothed_mask.max() - smoothed_mask.min() + 1e-10)
+    
+    # Interpolate mask if needed to match audio length
+    if len(smoothed_mask) != len(raw_audio):
+        time_points = np.linspace(0, len(raw_audio), len(smoothed_mask))
+        full_time = np.arange(len(raw_audio))
+        smoothed_mask = np.interp(full_time, time_points, smoothed_mask)
+    
+    # Apply mask to audio
+    output = raw_audio * smoothed_mask
+    
+    if return_mask:
+        return output, smoothed_mask
     else:
-        return clean, loud
-
-def mask_audio(wiener_outputs, raw_audio, rate=44100, window_ms=10, stride_ms=2, threshold=0.001, sigma=20):
+        return output
+    
+def mask_audio(wiener_outputs, raw_audio, sigma=100, rate=44100, window_ms=10, widen_ms=100, percentile=75, return_mask=False):
     """
-    Gets RMS of Wiener-filtered audio and uses it to mask the original audio to retain quality.
-    A gaussian filter is used to smooth in and out phases of speech to reduce choppiness.
+    Takes Wiener-filtered audio and returns masked audio.
     """
-    cleaned_outputs = []
-    for w, wout in tqdm(enumerate(wiener_outputs)):
-        loud = window_rms(wout)
-        #smooth in and outs to reduce choppiness
-        loud[np.where(loud!=1)] = gaussian_filter(loud, sigma)[np.where(loud!=1)]
-        loud[np.where(loud<threshold)] = 0
-        loud[np.where(loud>threshold)] = 1
-        clean = loud*raw_audio[w]
-        cleaned_outputs.append(clean)
-    return cleaned_outputs
+    masked_audio = []
+    for wout, raw in zip(wiener_outputs, raw_audio):
+        masked_audio.append(mask(wout, raw, sigma=sigma, rate=rate, window_ms=window_ms, widen_ms=widen_ms, percentile=percentile, return_mask=return_mask))
+    return masked_audio
 
 def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=None):
     if not output_name:
@@ -131,7 +147,7 @@ def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=
 
     return filenames
 
-def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_files=False, output_path=None):
+def isolate_audio(file_list, rate=44100, percentile=75, sigma=90, widen_ms=200, save_files=False, output_path=None):
     """
     Uses RMS values from Wiener-filtered audio to remove interference. Input is a list of audio files
     Returns numpy vectors representing the cleaned sound.
@@ -140,7 +156,7 @@ def isolate_audio(file_list, rate=44100, mask_threshold=0.001, sigma=20, save_fi
     wiener_outputs = apply_wiener(file_list)
     raw_audio = [nussl.AudioSignal(f).audio_data[0] for f in file_list]
     print('Masking...\n')
-    masked_audio = mask_audio(wiener_outputs, raw_audio, threshold=mask_threshold, sigma=sigma, rate=rate)
+    masked_audio = mask_audio(wiener_outputs, raw_audio, sigma=sigma, percentile=percentile, rate=rate, widen_ms=widen_ms)
     if save_files:
         # check if output path exists. If not, make it.
         if not os.path.exists(output_path):
