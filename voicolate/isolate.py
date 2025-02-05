@@ -253,8 +253,8 @@ def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=
 
     return filenames
 
-def isolate_audio(file_list, rate=44100, window_ms=10, base_sigma=100, base_widen_ms=200, base_percentile=75, speech_filter=True,
-                  speech_band_hz=(550, 2205), speech_sigma=100, speech_widen_ms=100, speech_percentile=90, save_files=False, output_path=None):
+def isolate_audio(file_list, rate=44100, window_ms=10, base_sigma=100, base_widen_ms=500, base_percentile=75, speech_filter=True,
+                  speech_band_hz=(100, 8000), speech_sigma=100, speech_widen_ms=500, speech_percentile=75, save_files=False, output_path=None):
     """
     Uses RMS values from Wiener-filtered audio to remove interference. Input is a list of audio files
     Returns numpy vectors representing the cleaned sound.
@@ -273,4 +273,3 @@ def isolate_audio(file_list, rate=44100, window_ms=10, base_sigma=100, base_wide
         return saved_files
     else:
         return masked_audio
-
