@@ -85,13 +85,14 @@ def normalize_audio_tracks(audio_list, method='rms', target_level=-23):
     return normalized_tracks
 
 def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None, return_outputs=True,
-                 batch_size=441000, cache_dir=None):
+                 batch_size=441000, cache_dir=None, overwrite=False):
     """
     Takes list of .wav files and returns filtered audio.
     Assumes all audio files are mono and of the *exact* same length.
     
     Parameters:
         cache_dir: Directory to store/load cached Wiener-filtered files. If None, uses 'wiener_cache' in current directory.
+        overwrite: If True, recompute and overwrite existing cached Wiener files. If False, use cached files when available.
     """
     if cache_dir is None:
         cache_dir = os.path.join(os.getcwd(), 'wiener_cache')
@@ -108,8 +109,8 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
         if not os.path.exists(cache_file):
             all_cached = False
     
-    # If all files are cached, load them and return
-    if all_cached:
+    # If all files are cached and we're not overwriting, load them and return
+    if all_cached and not overwrite:
         print("Loading cached Wiener-filtered files...\n")
         outs = []
         for cache_file in cached_files:
@@ -120,7 +121,7 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
             return outs
         return None
     
-    # If not cached, proceed with Wiener filtering
+    # If not cached or overwriting, proceed with Wiener filtering
     naud = len(file_list)
     estimates = [nussl.AudioSignal(i) for i in file_list]
     rate = estimates[0].sample_rate
@@ -128,13 +129,12 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
     if not all([estimates[i].audio_data.shape for i in range(naud)]):
         raise Exception("Audio files are of different lengths!")
     
-    # Extract audio data and normalize
+    # Extract raw audio data without normalization
     audio_data = [est.audio_data[0] for est in estimates]
-    normalized_audio = normalize_audio_tracks(audio_data, method='lufs', target_level=-23)
     
-    # Update the estimates with normalized audio
+    # Update the estimates with raw audio
     for i, est in enumerate(estimates):
-        est.audio_data = normalized_audio[i][np.newaxis, :]
+        est.audio_data = audio_data[i][np.newaxis, :]
 
     batches = arr_to_batch(np.array([estimates[i].audio_data[0] for i in range(naud)]), batch_size=batch_size)
 
@@ -152,7 +152,7 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
 
     outs = np.concatenate(outs, axis=1)
 
-    # Always save to cache
+    # Always save to cache (this will overwrite existing cache files if overwrite=True)
     for f, file in enumerate(file_list):
         cache_file = os.path.join(cache_dir, os.path.basename(file)[:-4] + '_wiener.wav')
         wavfile.write(cache_file, estimates[0].sample_rate, outs[f])
@@ -238,13 +238,16 @@ def smooth_mask(mask, sigma, downsample_factor, rate):
     return smoothed_mask
 
 class MaskConfig:
-    def __init__(self, rate=44100, window_ms=10, base_sigma=100, base_widen_ms=200, 
-                 base_percentile=90, speech_band_hz=(550, 2205), speech_sigma=100, 
+    def __init__(self, rate=44100, window_ms=100, iterations=20, base_sigma=100, base_widen_ms=200, 
+                 base_percentile=75, speech_band_hz=(550, 2205), speech_sigma=100, 
                  speech_widen_ms=100, speech_percentile=75, speech_filter=False,
                  min_duration_ms=100):
         # Basic audio parameters
         self.rate = rate                    # Sample rate of audio (Hz)
         self.window_ms = window_ms          # Window size for RMS calculation (milliseconds)
+
+        # Wiener filter parameters
+        self.iterations = iterations
         
         # Base mask parameters
         self.base_sigma = base_sigma        # Gaussian smoothing width for the mask
@@ -338,7 +341,8 @@ def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=
 
     return filenames
 
-def isolate_audio(file_list, config=None, save_files=False, output_path=None, cache_dir=None):
+def isolate_audio(file_list, config=None, save_files=False, output_path=None, cache_dir=None, overwrite=False,
+                normalize_output=True, normalization_params=None):
     """
     Uses RMS values from Wiener-filtered audio to remove interference.
     
@@ -348,15 +352,28 @@ def isolate_audio(file_list, config=None, save_files=False, output_path=None, ca
         save_files: Whether to save the final isolated audio files
         output_path: Directory to save final isolated audio files
         cache_dir: Directory to store/load cached Wiener-filtered files
+        overwrite: If True, recompute and overwrite existing cached Wiener files
+        normalize_output: Whether to normalize the final output (default: True)
+        normalization_params: Dictionary with normalization parameters. Defaults to 
+                            {'method': 'lufs', 'target_level': -23}
     """
     if config is None:
         config = MaskConfig()
+    
+    if normalize_output and normalization_params is None:
+        normalization_params = {'method': 'lufs', 'target_level': -23}
         
     print('Applying Wiener Filter or loading from cache...\n')
-    wiener_outputs = apply_wiener(file_list, cache_dir=cache_dir)
+    wiener_outputs = apply_wiener(file_list, cache_dir=cache_dir, overwrite=overwrite, iterations=config.iterations)
     raw_audio = [nussl.AudioSignal(f).audio_data[0] for f in file_list]
     print('Masking...\n')
     masked_audio = mask_audio(wiener_outputs, raw_audio, config)
+    
+    if normalize_output:
+        print('Normalizing output...\n')
+        masked_audio = normalize_audio_tracks(masked_audio, 
+                                           method=normalization_params['method'],
+                                           target_level=normalization_params['target_level'])
     
     if save_files:
         if not os.path.exists(output_path):
