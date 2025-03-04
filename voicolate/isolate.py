@@ -85,15 +85,45 @@ def normalize_audio_tracks(audio_list, method='rms', target_level=-23):
     return normalized_tracks
 
 def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None, return_outputs=True,
-                 batch_size=441000):
+                 batch_size=441000, cache_dir=None):
     """
     Takes list of .wav files and returns filtered audio.
-    Assumes all audio files are mono and of the *exact* same length
+    Assumes all audio files are mono and of the *exact* same length.
+    
+    Parameters:
+        cache_dir: Directory to store/load cached Wiener-filtered files. If None, uses 'wiener_cache' in current directory.
     """
+    if cache_dir is None:
+        cache_dir = os.path.join(os.getcwd(), 'wiener_cache')
+    
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    # Check if all Wiener-filtered files exist in cache
+    cached_files = []
+    all_cached = True
+    for file in file_list:
+        cache_file = os.path.join(cache_dir, os.path.basename(file)[:-4] + '_wiener.wav')
+        cached_files.append(cache_file)
+        if not os.path.exists(cache_file):
+            all_cached = False
+    
+    # If all files are cached, load them and return
+    if all_cached:
+        print("Loading cached Wiener-filtered files...\n")
+        outs = []
+        for cache_file in cached_files:
+            rate, data = wavfile.read(cache_file)
+            outs.append(data)
+        outs = np.array(outs)
+        if return_outputs:
+            return outs
+        return None
+    
+    # If not cached, proceed with Wiener filtering
     naud = len(file_list)
     estimates = [nussl.AudioSignal(i) for i in file_list]
     rate = estimates[0].sample_rate
-    shape = estimates[0].audio_data.shape[0]
 
     if not all([estimates[i].audio_data.shape for i in range(naud)]):
         raise Exception("Audio files are of different lengths!")
@@ -106,7 +136,6 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
     for i, est in enumerate(estimates):
         est.audio_data = normalized_audio[i][np.newaxis, :]
 
-    # this could be one problem
     batches = arr_to_batch(np.array([estimates[i].audio_data[0] for i in range(naud)]), batch_size=batch_size)
 
     outs = []
@@ -123,14 +152,22 @@ def apply_wiener(file_list, iterations=10, save_to_file=False, output_path=None,
 
     outs = np.concatenate(outs, axis=1)
 
+    # Always save to cache
+    for f, file in enumerate(file_list):
+        cache_file = os.path.join(cache_dir, os.path.basename(file)[:-4] + '_wiener.wav')
+        wavfile.write(cache_file, estimates[0].sample_rate, outs[f])
+
+    # Save to output path if requested
     if save_to_file:
         if output_path == None:
-            output_path = os.path.getcwd()
+            output_path = os.getcwd()
         for f, file in enumerate(file_list):
             out = os.path.join(output_path, os.path.basename(file)[:-4] + '_wiener.wav')
             wavfile.write(out, estimates[0].sample_rate, outs[f])
+            
     if return_outputs:
         return outs
+    return None
 
 def window_rms(a, rate=44100, window_ms=10):
     """
@@ -164,59 +201,110 @@ def get_band_rms(audio, band_hz, rate=44100, window_ms=10):
     # Calculate RMS
     return window_rms(filtered, rate=rate, window_ms=window_ms)
 
-def mask(wiener_output, raw_audio, rate=44100, window_ms=10, base_sigma=100,  base_widen_ms=200, base_percentile=75, 
-         speech_band_hz=(550, 2205), speech_sigma=100, speech_widen_ms=100, speech_percentile=90, speech_filter=True, return_mask=False):
+def smooth_mask(mask, sigma, downsample_factor, rate):
+    """
+    Smooth a binary mask by downsampling, applying Gaussian filter, and upsampling.
+    
+    Parameters:
+        mask: Binary mask array
+        sigma: Standard deviation for Gaussian filter
+        downsample_factor: Number of samples to combine for downsampling
+        rate: Original sample rate
+    
+    Returns:
+        Smoothed mask at original resolution
+    """
+    mask_len = len(mask)
+    downsampled_len = mask_len // downsample_factor
+    
+    # Downsample the mask (taking max value in each window)
+    downsampled_mask = np.array([np.max(mask[i:i+downsample_factor]) 
+                                for i in range(0, mask_len, downsample_factor)])
+    
+    # Apply Gaussian filter to downsampled mask
+    downsampled_sigma = sigma / downsample_factor  # Scale sigma for downsampled signal
+    smoothed_downsampled = gaussian_filter(downsampled_mask.astype(float), 
+                                         sigma=downsampled_sigma, 
+                                         mode='reflect')
+    
+    # Upsample back to original resolution using cubic interpolation
+    time_points = np.linspace(0, mask_len, len(smoothed_downsampled))
+    full_time = np.arange(mask_len)
+    smoothed_mask = np.interp(full_time, time_points, smoothed_downsampled)
+    
+    # Rescale the smoothed mask to [0,1] range
+    smoothed_mask = (smoothed_mask - smoothed_mask.min()) / (smoothed_mask.max() - smoothed_mask.min() + 1e-10)
+    
+    return smoothed_mask
+
+class MaskConfig:
+    def __init__(self, rate=44100, window_ms=10, base_sigma=100, base_widen_ms=200, 
+                 base_percentile=90, speech_band_hz=(550, 2205), speech_sigma=100, 
+                 speech_widen_ms=100, speech_percentile=75, speech_filter=False,
+                 min_duration_ms=100):
+        # Basic audio parameters
+        self.rate = rate                    # Sample rate of audio (Hz)
+        self.window_ms = window_ms          # Window size for RMS calculation (milliseconds)
+        
+        # Base mask parameters
+        self.base_sigma = base_sigma        # Gaussian smoothing width for the mask
+        self.base_widen_ms = base_widen_ms  # How much to widen the mask regions (milliseconds)
+        self.base_percentile = base_percentile  # Threshold percentile for initial mask creation
+        
+        # Speech-specific parameters
+        self.speech_band_hz = speech_band_hz    # Frequency range for speech detection (Hz)
+        self.speech_sigma = speech_sigma        # Gaussian smoothing for speech mask
+        self.speech_widen_ms = speech_widen_ms  # How much to widen speech regions (milliseconds)
+        self.speech_percentile = speech_percentile  # Threshold percentile for speech detection
+        self.speech_filter = speech_filter      # Whether to apply speech-specific filtering
+        
+        # Noise removal parameters
+        self.min_duration_ms = min_duration_ms  # Minimum duration of valid segments (milliseconds)
+        
+        # Pre-calculate commonly used values (in samples)
+        self.base_widen_samples = int((base_widen_ms / 1000) * rate)
+        self.speech_widen_samples = int((speech_widen_ms / 1000) * rate)
+        self.min_duration_samples = int((min_duration_ms / 1000) * rate)
+        self.downsample_factor = int(rate * 0.1)  # 100ms worth of samples for mask smoothing
+
+def mask(wiener_output, raw_audio, config, return_mask=False):
     """
     Modified masking function with two-pass filtering:
     1. Overall RMS-based mask (generated from the Wiener-filtered audio and applied to the raw audio)
     2. Speech-band specific mask (generated from the raw audio and applied to the raw audio)
     """
-    # Print parameters  
-    print(f'base_sigma: {base_sigma}, base_widen_ms: {base_widen_ms}, base_percentile: {base_percentile}, '
-          f'speech_band_hz: {speech_band_hz}, speech_sigma: {speech_sigma}, speech_widen_ms: {speech_widen_ms}, '
-          f'speech_percentile: {speech_percentile}')
-
-    # First pass: Overall RMS-based mask
-    base_widen_samples = int((base_widen_ms / 1000) * rate)
-    base_dilate_struct = np.ones(base_widen_samples)
-
     # Get overall RMS
-    rms = window_rms(wiener_output, rate=rate, window_ms=window_ms)
-    rms_percentile = np.percentile(rms, base_percentile)
+    rms = window_rms(wiener_output, rate=config.rate, window_ms=config.window_ms)
+    rms_percentile = np.percentile(rms, config.base_percentile)
     
     # Generate first mask
     base_mask = np.ones_like(rms)
     base_mask[rms < rms_percentile] = 0
     
+    # Remove short instances of 1's
+    eroded = binary_dilation(1 - base_mask, structure=np.ones(config.min_duration_samples))
+    base_mask = base_mask * (1 - eroded)
+    
     # Apply dilation
-    base_mask = binary_dilation(base_mask, structure=base_dilate_struct)
+    base_mask = binary_dilation(base_mask, structure=np.ones(config.base_widen_samples))
 
     # Second pass: Speech band specific mask
-    if speech_filter:
-        speech_band_rms = get_band_rms(wiener_output, speech_band_hz, rate, window_ms)
-        speech_threshold = np.percentile(speech_band_rms, speech_percentile)
+    if config.speech_filter:
+        speech_band_rms = get_band_rms(wiener_output, config.speech_band_hz, 
+                                     config.rate, config.window_ms)
+        speech_threshold = np.percentile(speech_band_rms, config.speech_percentile)
         
         speech_mask = np.ones_like(speech_band_rms)
         speech_mask[speech_band_rms < speech_threshold] = 0
-        speech_widen_samples = int((speech_widen_ms / 1000) * rate)
-        speech_dilate_struct = np.ones(speech_widen_samples)
-        speech_mask = binary_dilation(speech_mask, structure=speech_dilate_struct)
-        # Combine masks
+        speech_mask = binary_dilation(speech_mask, 
+                                    structure=np.ones(config.speech_widen_samples))
         combined_mask = base_mask * speech_mask
     else:
         combined_mask = base_mask
-
-    # Apply gaussian filter with proper scaling
-    smoothed_mask = gaussian_filter(combined_mask.astype(float), sigma=base_sigma, mode='reflect')
     
-    # Rescale the smoothed mask to [0,1] range
-    smoothed_mask = (smoothed_mask - smoothed_mask.min()) / (smoothed_mask.max() - smoothed_mask.min() + 1e-10)
-    
-    # Interpolate mask if needed to match audio length
-    if len(smoothed_mask) != len(raw_audio):
-        time_points = np.linspace(0, len(raw_audio), len(smoothed_mask))
-        full_time = np.arange(len(raw_audio))
-        smoothed_mask = np.interp(full_time, time_points, smoothed_mask)
+    # Apply smoothing
+    smoothed_mask = smooth_mask(combined_mask, config.base_sigma, 
+                              config.downsample_factor, config.rate)
     
     # Apply mask to audio
     output = raw_audio * smoothed_mask
@@ -225,17 +313,14 @@ def mask(wiener_output, raw_audio, rate=44100, window_ms=10, base_sigma=100,  ba
         return output, smoothed_mask
     else:
         return output
-    
-def mask_audio(wiener_outputs, raw_audio, rate=44100, window_ms=10, base_sigma=100, base_widen_ms=200, base_percentile=75, 
-               speech_band_hz=(550, 2205), speech_sigma=100, speech_widen_ms=100, speech_percentile=90, speech_filter=True, return_mask=False):
+
+def mask_audio(wiener_outputs, raw_audio, config):
     """
     Takes Wiener-filtered audio and returns masked audio.
     """
     masked_audio = []
     for wout, raw in zip(wiener_outputs, raw_audio):
-        masked_audio.append(mask(wout, raw, rate=rate, window_ms=window_ms, base_sigma=base_sigma, base_widen_ms=base_widen_ms, base_percentile=base_percentile, 
-                                 speech_band_hz=speech_band_hz, speech_sigma=speech_sigma, speech_widen_ms=speech_widen_ms, speech_percentile=speech_percentile, 
-                                 speech_filter=speech_filter, return_mask=return_mask))
+        masked_audio.append(mask(wout, raw, config))
     return masked_audio
 
 def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=None):
@@ -253,23 +338,30 @@ def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=
 
     return filenames
 
-def isolate_audio(file_list, rate=44100, window_ms=10, base_sigma=100, base_widen_ms=500, base_percentile=75, speech_filter=True,
-                  speech_band_hz=(100, 8000), speech_sigma=100, speech_widen_ms=500, speech_percentile=75, save_files=False, output_path=None):
+def isolate_audio(file_list, config=None, save_files=False, output_path=None, cache_dir=None):
     """
-    Uses RMS values from Wiener-filtered audio to remove interference. Input is a list of audio files
-    Returns numpy vectors representing the cleaned sound.
+    Uses RMS values from Wiener-filtered audio to remove interference.
+    
+    Parameters:
+        file_list: List of audio files to process
+        config: MaskConfig object for masking parameters
+        save_files: Whether to save the final isolated audio files
+        output_path: Directory to save final isolated audio files
+        cache_dir: Directory to store/load cached Wiener-filtered files
     """
-    print('Applying Wiener Filter, may take a while...\n')
-    wiener_outputs = apply_wiener(file_list)
+    if config is None:
+        config = MaskConfig()
+        
+    print('Applying Wiener Filter or loading from cache...\n')
+    wiener_outputs = apply_wiener(file_list, cache_dir=cache_dir)
     raw_audio = [nussl.AudioSignal(f).audio_data[0] for f in file_list]
     print('Masking...\n')
-    masked_audio = mask_audio(wiener_outputs, raw_audio, rate=rate, window_ms=window_ms, base_sigma=base_sigma, base_widen_ms=base_widen_ms, base_percentile=base_percentile, 
-                             speech_band_hz=speech_band_hz, speech_sigma=speech_sigma, speech_widen_ms=speech_widen_ms, speech_percentile=speech_percentile, speech_filter=speech_filter)
+    masked_audio = mask_audio(wiener_outputs, raw_audio, config)
+    
     if save_files:
-        # check if output path exists. If not, make it.
         if not os.path.exists(output_path):
             os.makedirs(output_path)
-        saved_files = save_isolated_audio(masked_audio, rate, output_path)
+        saved_files = save_isolated_audio(masked_audio, config.rate, output_path)
         return saved_files
     else:
         return masked_audio
