@@ -320,16 +320,9 @@ def adaptive_mask(target_audio, interference_audio, config):
 
 def mask_audio(wiener_outputs, raw_audio, config):
     """
-    Optimized version of audio masking
+    Optimized version of audio masking without noise addition
     """
     masked_audio = []
-    n_samples = len(raw_audio[0])
-    
-    # Pre-generate noise for all tracks
-    max_amplitudes = np.array([np.max(np.abs(raw)) for raw in raw_audio])
-    noise_amplitudes = max_amplitudes * 0.0001  # -80dB relative to peak
-    all_noise = np.random.normal(0, noise_amplitudes[:, np.newaxis], 
-                               size=(len(raw_audio), n_samples))
     
     for i, (wout, raw) in enumerate(zip(wiener_outputs, raw_audio)):
         # Get interference tracks efficiently
@@ -338,8 +331,8 @@ def mask_audio(wiener_outputs, raw_audio, config):
         # Create and apply mask
         mask_values = adaptive_mask(wout, interference, config)
         
-        # Vectorized masking operation
-        masked = raw * mask_values + all_noise[i] * (1 - mask_values)
+        # Simple masking operation
+        masked = raw * mask_values
         masked_audio.append(masked)
 
     return masked_audio
