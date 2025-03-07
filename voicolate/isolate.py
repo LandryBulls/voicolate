@@ -241,7 +241,7 @@ class MaskConfig:
     def __init__(self, rate=44100, window_ms=100, iterations=20, base_sigma=100, base_widen_ms=200, 
                  base_percentile=75, speech_band_hz=(550, 2205), speech_sigma=100, 
                  speech_widen_ms=100, speech_percentile=75, speech_filter=False,
-                 min_duration_ms=100):
+                 min_duration_ms=100, adaptive_scale=0.1):
         # Basic audio parameters
         self.rate = rate                    # Sample rate of audio (Hz)
         self.window_ms = window_ms          # Window size for RMS calculation (milliseconds)
@@ -264,66 +264,70 @@ class MaskConfig:
         # Noise removal parameters
         self.min_duration_ms = min_duration_ms  # Minimum duration of valid segments (milliseconds)
         
+        # Adaptive parameters
+        self.adaptive_scale = adaptive_scale  # Controls how quickly threshold adapts to SIR
+        
         # Pre-calculate commonly used values (in samples)
         self.base_widen_samples = int((base_widen_ms / 1000) * rate)
         self.speech_widen_samples = int((speech_widen_ms / 1000) * rate)
         self.min_duration_samples = int((min_duration_ms / 1000) * rate)
         self.downsample_factor = int(rate * 0.1)  # 100ms worth of samples for mask smoothing
 
-def mask(wiener_output, raw_audio, config, return_mask=False):
+def adaptive_mask(target_audio, interference_audio, config):
     """
-    Modified masking function with two-pass filtering:
-    1. Overall RMS-based mask (generated from the Wiener-filtered audio and applied to the raw audio)
-    2. Speech-band specific mask (generated from the raw audio and applied to the raw audio)
+    Creates an adaptive mask based on the relative loudness of target vs interference.
+    
+    Parameters:
+        target_audio: The audio track to be filtered
+        interference_audio: List of other tracks that constitute interference
+        config: MaskConfig object with additional adaptive parameters
     """
-    # Get overall RMS
-    rms = window_rms(wiener_output, rate=config.rate, window_ms=config.window_ms)
-    rms_percentile = np.percentile(rms, config.base_percentile)
+    # Get RMS of target and interference
+    target_rms = window_rms(target_audio, rate=config.rate, window_ms=config.window_ms)
     
-    # Generate first mask
-    base_mask = np.ones_like(rms)
-    base_mask[rms < rms_percentile] = 0
+    # Combine interference tracks and get their RMS
+    interference_mix = additive_mix(interference_audio)
+    interference_rms = window_rms(interference_mix, rate=config.rate, window_ms=config.window_ms)
     
-    # Remove short instances of 1's
-    eroded = binary_dilation(1 - base_mask, structure=np.ones(config.min_duration_samples))
-    base_mask = base_mask * (1 - eroded)
+    # Calculate signal-to-interference ratio (in dB)
+    sir = 20 * np.log10((target_rms + 1e-8) / (interference_rms + 1e-8))
+    
+    # Create adaptive threshold based on SIR
+    # When SIR is high (target much louder than interference), threshold is low
+    # When SIR is low (interference comparable/louder than target), threshold is high
+    base_threshold = np.percentile(target_rms, config.base_percentile)
+    adaptive_threshold = base_threshold * np.exp(-sir * config.adaptive_scale)
+    
+    # Generate mask with adaptive threshold
+    mask = np.ones_like(target_rms)
+    mask[target_rms < adaptive_threshold] = 0
+    
+    # Remove short segments
+    eroded = binary_dilation(1 - mask, structure=np.ones(config.min_duration_samples))
+    mask = mask * (1 - eroded)
     
     # Apply dilation
-    base_mask = binary_dilation(base_mask, structure=np.ones(config.base_widen_samples))
-
-    # Second pass: Speech band specific mask
-    if config.speech_filter:
-        speech_band_rms = get_band_rms(wiener_output, config.speech_band_hz, 
-                                     config.rate, config.window_ms)
-        speech_threshold = np.percentile(speech_band_rms, config.speech_percentile)
-        
-        speech_mask = np.ones_like(speech_band_rms)
-        speech_mask[speech_band_rms < speech_threshold] = 0
-        speech_mask = binary_dilation(speech_mask, 
-                                    structure=np.ones(config.speech_widen_samples))
-        combined_mask = base_mask * speech_mask
-    else:
-        combined_mask = base_mask
+    mask = binary_dilation(mask, structure=np.ones(config.base_widen_samples))
     
-    # Apply smoothing
-    smoothed_mask = smooth_mask(combined_mask, config.base_sigma, 
+    # Smooth the mask
+    smoothed_mask = smooth_mask(mask, config.base_sigma, 
                               config.downsample_factor, config.rate)
     
-    # Apply mask to audio
-    output = raw_audio * smoothed_mask
-    
-    if return_mask:
-        return output, smoothed_mask
-    else:
-        return output
+    return smoothed_mask
 
 def mask_audio(wiener_outputs, raw_audio, config):
     """
-    Takes Wiener-filtered audio and returns masked audio.
+    Takes Wiener-filtered audio and returns masked audio using adaptive thresholds.
     """
     masked_audio = []
-    for wout, raw in zip(wiener_outputs, raw_audio):
-        masked_audio.append(mask(wout, raw, config))
+    for i, (wout, raw) in enumerate(zip(wiener_outputs, raw_audio)):
+        # Get interference tracks (all except current track)
+        interference = [raw_audio[j] for j in range(len(raw_audio)) if j != i]
+        
+        # Create and apply adaptive mask
+        adaptive_mask_values = adaptive_mask(wout, interference, config)
+        masked_audio.append(raw * adaptive_mask_values)
+    
     return masked_audio
 
 def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=None):
