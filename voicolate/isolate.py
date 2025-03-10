@@ -251,7 +251,7 @@ class MaskConfig:
     def __init__(self, rate=44100, window_ms=100, iterations=20, base_sigma=100, base_widen_ms=200, 
                  base_percentile=50, speech_band_hz=(550, 2205), speech_sigma=100, 
                  speech_widen_ms=100, speech_percentile=75, speech_filter=False,
-                 min_duration_ms=100, adaptive_scale=0.1):
+                 min_duration_ms=100, adaptive_scale=0.2):
         # Basic audio parameters
         self.rate = rate                    # Sample rate of audio (Hz)
         self.window_ms = window_ms          # Window size for RMS calculation (milliseconds)
@@ -285,24 +285,35 @@ class MaskConfig:
 
 def adaptive_mask(target_audio, interference_audio, config):
     """
-    Optimized version of adaptive mask creation
+    Optimized version of adaptive mask creation with balanced thresholding
     """
     # Calculate RMS values
     target_rms = window_rms(target_audio, rate=config.rate, window_ms=config.window_ms)
     interference_mix = additive_mix(interference_audio)
     interference_rms = window_rms(interference_mix, rate=config.rate, window_ms=config.window_ms)
     
-    # Vectorized SIR calculation
-    sir = 20 * np.log10((target_rms + 1e-8) / (interference_rms + 1e-8))
+    # Get base threshold using both target and interference information
+    base_threshold = max(np.percentile(target_rms, config.base_percentile), 1e-6)
+    interference_threshold = np.percentile(interference_rms, 25)  # 25th percentile of interference
     
-    # Vectorized threshold calculation
-    base_threshold = np.percentile(target_rms, config.base_percentile)
-    adaptive_threshold = base_threshold * np.exp(-sir * config.adaptive_scale)
+    # Ensure minimum threshold is related to interference level
+    min_threshold = max(base_threshold * 0.2, interference_threshold * 0.5)
     
-    # Create mask (vectorized comparison)
-    mask = (target_rms >= adaptive_threshold).astype(float)
+    # Calculate SIR with tighter bounds
+    sir = np.clip(20 * np.log10((target_rms + 1e-8) / (interference_rms + 1e-8)), -20, 20)
     
-    # Optimize binary operations using scipy's binary_dilation
+    # More gradual adaptive scaling
+    adaptive_scale = np.clip(np.exp(-sir * config.adaptive_scale), 0.5, 3.0)
+    
+    # Calculate adaptive threshold with minimum bound
+    adaptive_threshold = np.maximum(base_threshold * adaptive_scale, min_threshold)
+    
+    # Create mask with additional interference rejection
+    primary_mask = (target_rms >= adaptive_threshold).astype(float)
+    interference_mask = (target_rms >= interference_rms * 0.8).astype(float)
+    mask = primary_mask * interference_mask  # Both conditions must be met
+    
+    # Rest of the function remains the same
     if config.min_duration_samples > 1:
         structure = np.ones(config.min_duration_samples)
         eroded = binary_dilation(1 - mask, structure=structure)
