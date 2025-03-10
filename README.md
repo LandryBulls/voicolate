@@ -175,15 +175,15 @@ david_clean = isolated_voices[3]
 
 The adaptive threshold at time t is calculated as:
 
-\[
+```math
 threshold(t) = \max(base_{threshold} \cdot e^{-SIR(t) \cdot scale}, min_{threshold})
-\]
+```
 
 where SIR(t) is the Signal-to-Interference Ratio in decibels:
 
-\[
+```math
 SIR(t) = 20 \log_{10}\left(\frac{RMS_{target}(t)}{RMS_{interference}(t)}\right)
-\]
+```
 
 This adaptive thresholding ensures that:
 - When SIR is high (strong target signal), the threshold decreases exponentially
