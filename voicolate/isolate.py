@@ -792,13 +792,13 @@ def isolate_audio(file_list, config=None, save_files=False, output_path=None, ca
         return masked_audio
 
 
-def isolate_spectral(file_list, dominance_margin_db=3.0, harmonicity_weight=0.5,
+def isolate_spectral(file_list, dominance_margin_db=1.0, harmonicity_weight=0.5,
                      nperseg=2048, noverlap=1536, smoothing_time_frames=3, 
                      smoothing_freq_bins=5, normalize_input=True, 
                      save_files=False, output_path=None, peak_limit_db=-1.0,
-                     apply_gate=True, gate_threshold_db=-40, gate_ratio=4.0,
+                     apply_gate=True, gate_threshold_db=-75, gate_ratio=4.0,
                      gate_attack_ms=5, gate_release_ms=50,
-                     gate_lookahead_ms=30, gate_hold_ms=50):
+                     gate_lookahead_ms=50, gate_hold_ms=75):
     """
     Isolate audio using cross-microphone spectral dominance.
     
@@ -824,7 +824,7 @@ def isolate_spectral(file_list, dominance_margin_db=3.0, harmonicity_weight=0.5,
         output_path: Where to save output files
         peak_limit_db: Peak limiting threshold in dB
         apply_gate: Apply soft noise gate to remove residual bleedthrough (default: True)
-        gate_threshold_db: Gate threshold in dB below peak (default: -40, lower = more aggressive)
+        gate_threshold_db: Gate threshold in dB below peak (default: -75, lower = more aggressive)
         gate_ratio: Expansion ratio (default: 4.0, higher = more attenuation)
         gate_attack_ms: Gate attack time (default: 5ms)
         gate_release_ms: Gate release time (default: 50ms)

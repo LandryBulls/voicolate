@@ -66,7 +66,7 @@ param_grid = {
     'smoothing_freq_bins': [5],                   # Fixed for now
     'nperseg': [2048],                            # Fixed for now
     'apply_gate': [True],                         # Soft gate for residual bleedthrough
-    'gate_threshold_db': [-45],              # dB below peak (-35 = more aggressive)
+    'gate_threshold_db': [-75],              # dB below peak (-35 = more aggressive)
     'gate_ratio': [4.0],                          # Expansion ratio
 }
 
