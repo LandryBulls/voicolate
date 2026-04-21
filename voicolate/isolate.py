@@ -370,7 +370,7 @@ def apply_spectral_mask(audio, mask, rate=44100, nperseg=2048, noverlap=1536):
     return reconstructed
 
 
-def soft_gate(audio, rate=44100, threshold_db=-40, ratio=4.0, attack_ms=5, release_ms=50,
+def soft_gate(audio, rate=44100, threshold_db=-75, ratio=4.0, attack_ms=5, release_ms=50,
               window_ms=20, knee_db=6, lookahead_ms=30, hold_ms=50):
     """
     Apply a soft noise gate/expander to attenuate quiet sections.
@@ -477,9 +477,9 @@ def soft_gate(audio, rate=44100, threshold_db=-40, ratio=4.0, attack_ms=5, relea
 def cross_mic_spectral_filter(all_audio, rate=44100, nperseg=2048, noverlap=1536,
                               dominance_margin_db=3.0, harmonicity_weight=0.5,
                               smoothing_time_frames=3, smoothing_freq_bins=5,
-                              apply_gate=True, gate_threshold_db=-40, gate_ratio=4.0,
+                              apply_gate=True, gate_threshold_db=-75, gate_ratio=4.0,
                               gate_attack_ms=5, gate_release_ms=50,
-                              gate_lookahead_ms=30, gate_hold_ms=50):
+                              gate_lookahead_ms=50, gate_hold_ms=75):
     """
     Main spectral filtering function using cross-microphone dominance.
     
@@ -706,7 +706,7 @@ def save_isolated_audio(array_list, rate=44100, output_path = None, output_name=
 
     return filenames
 
-def isolate_audio(file_list, dominance_margin_db=1.0, harmonicity_weight=0.5,
+def isolate(file_list, dominance_margin_db=1.0, harmonicity_weight=0.5,
                      nperseg=2048, noverlap=1536, smoothing_time_frames=3, 
                      smoothing_freq_bins=5, normalize_input=True, 
                      save_files=False, output_path=None, peak_limit_db=-1.0,
