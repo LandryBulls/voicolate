@@ -1,4 +1,122 @@
-# Audio Isolation Pipeline
+# voicolate
+
+Voice isolation for conversation studies with multiple microphones: one close-talk,
+face-worn cardioid per participant, recorded in close quarters and sample-aligned.
+
+## Which path to use
+
+`isolate_v3` (v3) is the current path. `isolate` (v2) is kept unchanged so existing
+`_isolated_v2.wav` files remain reproducible; it should not be used for new work.
+
+```bash
+python scripts/isolate_session.py /path/to/session          # one session
+python scripts/isolate_session.py /path/to/sessions --all   # every session under a dir
+python scripts/isolate_session.py /path/to/session --force  # reprocess
+```
+
+Each run writes, into the session's `processed/`:
+
+| file | contents |
+|---|---|
+| `TRACK0N_trimmed_isolated_v3.wav` | isolated audio |
+| `TRACK0N_trimmed_speaking_v3.npz` | per-frame speech probability (~86 Hz) + rate metadata |
+| `{session}_isolation_params.json` | the exact config and the voicolate git SHA |
+| `{session}_isolation_qc.json` | measured speech retention and bleed rejection |
+
+```python
+from voicolate import IsolationConfig, isolate_v3
+result = isolate_v3(['TRACK01_trimmed.wav', 'TRACK02_trimmed.wav'],
+                    config=IsolationConfig())
+result['audio']               # one isolated array per microphone
+result['speech_probability']  # the multichannel VAD that drove the suppression
+```
+
+## How it works
+
+The physical fact the method rests on: during real speech, a talker's own microphone
+leads every other microphone by a wide margin -- median 27 dB, measured. Deciding
+who owns each time-frequency bin is therefore mostly easy, and the whole problem is
+in handling the frames where it is not.
+
+1. **Calibration.** Per-track gains that put the microphones on a common footing,
+   from the 95th-percentile frame level (`calibration='speech_level'`, the default)
+   or by symmetrising the measured bleed matrix (`'bleed_symmetry'`). Both are
+   invariant to how much each person talked.
+2. **Time-frequency mask.** A soft, floored sigmoid on cross-microphone dominance.
+3. **Speech presence.** A per-frame probability combining dominance across the array
+   with level above *that track's own noise floor*, with a symmetric hangover.
+4. **Suppression.** Bounded by `residual_floor_db`, so nothing is ever destroyed.
+
+Processing is blocked, so peak memory does not depend on session length or on the
+number of microphones; calibration and speech presence are decided globally
+beforehand on cheap frame envelopes, so blocking cannot change the result.
+
+## Why v3 replaces v2
+
+v2 suppressed residual bleed with `soft_gate`, which measured level against the
+**file's global peak** and expanded below a threshold with **no floor**.
+
+* The peak of a 30-minute track is set by its worst transient. On `2024-05-22_000`
+  the peak sits 17.7-19.0 dB above the actual speech level, so a "-40 dB below peak"
+  threshold lands only ~22 dB under speech and removes the bottom half of the speech
+  dynamic range. A session with a louder bump gets a proportionally more aggressive
+  gate, which is why the damage varied session to session.
+* `gain_db = (rms_db - threshold_db) * (ratio - 1)` is unbounded, so quiet frames
+  collapsed to digital silence. Across 82 sessions the median track has **70% of its
+  samples at exactly zero**, with silent runs up to 219 s.
+
+Measured on the same harness -- fraction of *clear* speech frames (target dominant by
+>6 dB and >12 dB above its own noise floor) attenuated by more than 12 dB:
+
+| session | v2 | v3 |
+|---|---|---|
+| `2024-05-22_000` (2 mics) | 17.7% | **0.0%** |
+| `2024-09-27_000` (4 mics) | 16.3% | **0.0%** |
+
+with no loss of bleed rejection, no digital silence over speech, and a 2.5-5x
+speedup (185 s -> 37 s for 2 mics; 73 s for 4 mics).
+
+## QC
+
+Every run measures itself, so a bad session raises instead of passing silently:
+
+```
+track              spk_s   floor   cut>6  cut>12  cut>20   bleed  zero%  spk_sil
+TRACK01_trimmed      402   -67.2   0.003   0.000   0.000   -23.8  26.11     0.00
+TRACK02_trimmed     1132   -67.6   0.000   0.000   0.000   -25.0  14.01     0.00
+```
+
+`spk_sil` -- seconds of clear speech driven to exact zero -- is the metric that
+distinguishes the v2 failure from harmless int16 quantisation of a residual already
+100 dB below speech. Thresholds are in `voicolate/qc.py`.
+
+## Residual bleed and ASR
+
+After v3, what survives suppression is quiet but structurally intact, and audible on
+close listening. Whether that matters was measured rather than assumed, with WhisperX
+large-v2 (which repeats bit-identically on the same audio, so the comparison has no
+run-to-run noise). On `2024-05-22_000` TRACK01, of 1486 transcribed words, 10 fall
+where that speaker's own VAD says they were silent and 6 match a word TRACK02 said at
+the same moment -- 0.4-0.7% either way.
+
+`residual_noise_over_db` fills the suppressed regions with ambience-shaped noise and
+removes all 10 of the first kind, but costs ~4.3% of the speaker's own words, at every
+level tested (+3, +6, +12 dB -- the cost is a step, not a slope). It is therefore
+**off by default**; enable it when a word attributed to the wrong speaker costs more
+than a missing one. Note that the 6 text-matched words are not clean bleed: all have
+the target's own VAD active and are backchannels during overlap ("nice", "no no no"),
+so no audio-side treatment separates them from genuine simultaneous speech.
+
+## Tests
+
+```bash
+python -m pytest tests/
+```
+
+
+---
+
+## v2 pipeline (historical)
 
 This document explains the audio isolation pipeline implemented in the `voicolate` package, with particular focus on the adaptive masking process used to separate audio sources.
 

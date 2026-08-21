@@ -1,10 +1,16 @@
 import numpy as np
 from scipy.io import wavfile
-from scipy.ndimage import gaussian_filter, binary_dilation, percentile_filter, uniform_filter
+from scipy.ndimage import (gaussian_filter, binary_dilation, percentile_filter,
+                           uniform_filter, maximum_filter1d)
 import os
 from tqdm import tqdm
 from scipy import signal
 from scipy.signal import stft, istft, welch
+from dataclasses import replace
+
+from .config import IsolationConfig
+from .calibrate import (frame_levels, noise_floor, speech_level,
+                        calibration_gains, bleed_matrix)
 
 # Lazy import for nussl (has scipy version compatibility issues)
 _nussl = None
@@ -801,3 +807,333 @@ def isolate(file_list, dominance_margin_db=1.0, harmonicity_weight=0.5,
         return save_isolated_audio(filtered_audio, rate, output_path)
     
     return filtered_audio
+
+# =============================================================================
+# v3 isolation path
+#
+# The v2 path above suppresses residual bleed with `soft_gate`, which measures
+# level against the file's *global peak* and expands below a threshold with no
+# floor. Both properties are load-bearing failures:
+#
+#   * The peak of a 30-minute track is set by its worst transient. Measured on
+#     2024-05-22_000, the peak sits 17.7-19.0 dB above the actual speech level,
+#     so a "-40 dB below peak" threshold lands only ~22 dB under speech and
+#     removes the bottom half of the speech dynamic range. A session with a
+#     louder bump gets a proportionally more aggressive gate, which is why the
+#     damage varies session to session rather than uniformly.
+#   * `gain_db = (rms_db - threshold_db) * (ratio - 1)` is unbounded, so quiet
+#     frames collapse to digital silence. Across the 82 sessions on safescratch
+#     the median track has 70% of its samples at exactly zero, with silent runs
+#     up to 219 s.
+#
+# v3 keeps the cross-microphone dominance idea, which is sound -- during real
+# speech the target's own mic leads by ~27 dB median -- and replaces the gate
+# with a decision that uses the array instead of an absolute level, referenced
+# to each track's own noise floor and floored so nothing is ever destroyed.
+# =============================================================================
+
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -60.0, 60.0)))
+
+
+def load_tracks(file_list):
+    """Load aligned mono tracks as float32 in [-1, 1], zero-padded to one length."""
+    rate = None
+    tracks = []
+    for f in file_list:
+        r, data = wavfile.read(f)
+        if rate is None:
+            rate = r
+        elif r != rate:
+            raise ValueError(f"Sample rate mismatch: {f} has rate {r}, expected {rate}")
+        if data.dtype == np.int16:
+            data = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            data = data.astype(np.float32) / 2147483648.0
+        else:
+            data = data.astype(np.float32)
+        if data.ndim > 1:
+            data = data[:, 0]
+        tracks.append(data)
+
+    n = max(len(t) for t in tracks)
+    tracks = [t if len(t) == n else np.pad(t, (0, n - len(t))) for t in tracks]
+    return rate, tracks
+
+
+def _bandpass(audio, rate, band_hz):
+    """Zero-phase bandpass, used to keep rumble and hiss out of the level decision."""
+    nyq = rate / 2.0
+    low = max(band_hz[0] / nyq, 1e-4)
+    high = min(band_hz[1] / nyq, 0.99)
+    b, a = signal.butter(4, [low, high], btype='band')
+    return signal.filtfilt(b, a, audio.astype(np.float64))
+
+
+def max_excluding(mags):
+    """For every mic, the loudest of all the *other* mics at each T-F bin.
+
+    Derived from the array-wide largest and second-largest value rather than by
+    re-reducing N-1 mics once per target, so the work does not grow with the
+    number of microphones. `compute_spectral_dominance_mask` above recomputes
+    every mic's STFT for every target, which costs N^2 transforms and roughly
+    2.6 GB per full-length spectrum at N=4.
+
+    Returns ``(top1, top2, argmax)``; the answer for target ``i`` is
+    ``np.where(argmax == i, top2, top1)``.
+    """
+    idx = np.argmax(mags, axis=0)
+    top1 = np.take_along_axis(mags, idx[None], axis=0)[0]
+    # blank the winner in place, take the next largest, then put the winner back
+    np.put_along_axis(mags, idx[None], 0.0, axis=0)
+    top2 = np.max(mags, axis=0)
+    np.put_along_axis(mags, idx[None], top1[None], axis=0)
+    return top1, top2, idx
+
+
+def _harmonicity(target_mag, eps=1e-10):
+    """Per-frame 1 - spectral flatness. Off by default; see `IsolationConfig`."""
+    gm = np.exp(np.mean(np.log(target_mag + eps), axis=0))
+    am = np.mean(target_mag, axis=0)
+    return np.clip(1.0 - gm / (am + eps), 0.0, 1.0)
+
+
+def dominance_mask(target_mag, other_mag, cfg):
+    """Soft, floored time-frequency mask from cross-microphone dominance.
+
+    The v2 mask ramps linearly from fully closed to fully open across +/- the
+    margin and clips at zero. Real dominance during speech is 20+ dB, so the
+    sharpness buys nothing where the answer is obvious and destroys the frames
+    where it is genuinely ambiguous. This uses a wider sigmoid and never closes
+    a bin completely, which also suppresses musical noise.
+    """
+    eps = 1e-10
+    dominance_db = 20 * np.log10((target_mag + eps) / (other_mag + eps))
+    mask = cfg.mask_floor + (1.0 - cfg.mask_floor) * _sigmoid(
+        (dominance_db - cfg.dominance_margin_db) / (cfg.dominance_width_db / 4.0))
+
+    if cfg.harmonicity_weight > 0:
+        h = _harmonicity(target_mag)
+        mask *= (1.0 - cfg.harmonicity_weight) + cfg.harmonicity_weight * h[None, :]
+
+    if cfg.smoothing_freq_bins > 1 or cfg.smoothing_time_frames > 1:
+        mask = uniform_filter(mask, mode='nearest',
+                              size=(cfg.smoothing_freq_bins, cfg.smoothing_time_frames))
+    return mask
+
+
+def speech_presence(band_levels, target_idx, floor, cfg):
+    """Per-frame probability that the target is the one speaking.
+
+    Two independent pieces of evidence, both required:
+
+      * the target's mic leads every other mic across the speech band, and
+      * the target's mic sits meaningfully above *its own* noise floor.
+
+    The second is what `soft_gate` was reaching for, but it measured level
+    against the global peak. A noise floor is a property of the microphone; a
+    peak is a property of the worst thing that happened during the session.
+
+    The hangover is symmetric, so one dilation protects both onsets and the
+    low-energy unvoiced tails that a release-only gate clips off.
+    """
+    L = np.asarray(band_levels)
+    target = L[target_idx]
+    others = np.max(np.delete(L, target_idx, axis=0), axis=0)
+
+    dominance_db = 20 * np.log10(target / others)
+    snr_db = 20 * np.log10(target / floor)
+
+    p = (_sigmoid(dominance_db / cfg.presence_dominance_width_db)
+         * _sigmoid((snr_db - cfg.presence_snr_db) / (cfg.presence_snr_width_db / 4.0)))
+
+    hang = max(1, int(round(cfg.hangover_ms / 1000.0 * cfg.frame_rate)))
+    return maximum_filter1d(p, size=2 * hang + 1, mode='nearest')
+
+
+def ambience_spectrum(track, levels, cfg, seconds=20.0):
+    """Median magnitude spectrum of one microphone while nobody is talking.
+
+    Sampled from the quietest one-second windows of the track, so the substituted
+    noise sounds like that room through that microphone rather than like white
+    noise dropped into a recording.
+    """
+    win = max(1, int(round(cfg.frame_rate)))            # frames per second
+    n_win = len(levels) // win
+    if n_win < 4:
+        return None
+    per_window = levels[:n_win * win].reshape(n_win, win).mean(axis=1)
+    n_take = int(np.clip(seconds, 4, max(4, n_win // 10)))
+    take = np.argsort(per_window)[:n_take]
+    chunk = win * cfg.hop
+    quiet = np.concatenate([track[k * chunk:(k + 1) * chunk] for k in take])
+    if len(quiet) < cfg.nperseg * 2:
+        return None
+    spec = stft(quiet, fs=cfg.rate, nperseg=cfg.nperseg, noverlap=cfg.noverlap)[2]
+    return np.median(np.abs(spec), axis=1)
+
+
+_NOISE_GRID = 1 << 20
+
+
+def positional_noise(start, n_samples, track_idx, cfg):
+    """White noise determined by absolute sample position, not by draw order.
+
+    Drawing from a running generator would make the output depend on how the
+    session happened to be split into blocks. Seeding on a fixed grid keeps
+    `block_seconds` a pure implementation detail.
+    """
+    first, last = start // _NOISE_GRID, (start + n_samples - 1) // _NOISE_GRID
+    buf = np.concatenate([
+        np.random.default_rng([cfg.seed, track_idx, g]).standard_normal(
+            _NOISE_GRID).astype(np.float32)
+        for g in range(first, last + 1)])
+    off = start - first * _NOISE_GRID
+    return buf[off:off + n_samples]
+
+
+def shaped_noise_spectrum(start, n_samples, ambience, cfg, track_idx):
+    """STFT of time-domain noise shaped to `ambience`.
+
+    Generated in the time domain and transformed, rather than synthesised from
+    random phase, so the overlap-add in `istft` stays consistent and the noise
+    comes out at the level it was asked for.
+    """
+    noise = positional_noise(start, n_samples, track_idx, cfg)
+    spec = stft(noise, fs=cfg.rate, nperseg=cfg.nperseg, noverlap=cfg.noverlap)[2]
+    white = np.median(np.abs(spec), axis=1, keepdims=True)
+    return spec * (ambience[:, None] / np.maximum(white, 1e-20))
+
+
+def isolate_v3(file_list, config=None, verbose=True):
+    """Isolate each microphone's own speaker using the whole array.
+
+    Returns a dict with the isolated audio, the per-frame speech probability that
+    drove the suppression, and everything measured along the way.
+
+    Processing is blocked so peak memory does not depend on session length or on
+    the number of microphones; the calibration and speech-presence decisions are
+    made once globally beforehand, on cheap frame envelopes, so blocking cannot
+    change them.
+    """
+    cfg = config or IsolationConfig()
+
+    if verbose:
+        print("Loading audio files...")
+    rate, tracks = load_tracks(file_list)
+    if rate != cfg.rate:
+        cfg = replace(cfg, rate=rate)
+    n_mics = len(tracks)
+    n_samples = len(tracks[0])
+    hop = cfg.hop
+
+    # --- pass 1: calibrate the tracks against each other -------------------
+    if verbose:
+        print(f"Calibrating {n_mics} tracks ({cfg.calibration})...")
+    levels = [frame_levels(t, hop) for t in tracks]
+    gains, cal_info = calibration_gains(
+        levels, method=cfg.calibration, target_level_db=cfg.target_level_db,
+        speech_level_percentile=cfg.speech_level_percentile)
+    tracks = [t * g for t, g in zip(tracks, gains)]
+    levels = [l * g for l, g in zip(levels, gains)]
+    floors = [noise_floor(l, cfg.noise_floor_percentile) for l in levels]
+    if verbose:
+        print(f"  gains (dB):        {cal_info['gains_db']}")
+        print(f"  noise floor (dBFS): {[round(20 * np.log10(f), 1) for f in floors]}")
+
+    # --- pass 2: frame-rate speech presence, from band-limited envelopes ----
+    if verbose:
+        print("Computing cross-microphone speech presence...")
+    band = []
+    for t in tqdm(tracks, desc="Band levels", disable=not verbose):
+        band.append(frame_levels(_bandpass(t, rate, cfg.speech_band_hz), hop))
+    band_floors = [noise_floor(b, cfg.noise_floor_percentile) for b in band]
+    presence = [speech_presence(band, i, band_floors[i], cfg) for i in range(n_mics)]
+    del band
+
+    ambience = [None] * n_mics
+    if cfg.fills_residual:
+        ambience = [ambience_spectrum(t, l, cfg, cfg.ambience_seconds)
+                    for t, l in zip(tracks, levels)]
+        if verbose:
+            missing = [i for i, a in enumerate(ambience) if a is None]
+            print(f"Comfort noise at {cfg.residual_noise_over_db:+.0f} dB over the residual"
+                  + (f" (no ambience for tracks {missing})" if missing else ""))
+
+    # --- pass 3: blocked time-frequency masking ----------------------------
+    block = max(1, int(cfg.block_seconds * rate) // hop) * hop
+    pad = max(1, int(cfg.block_pad_seconds * rate) // hop) * hop
+    out = [np.zeros(n_samples, dtype=np.float32) for _ in range(n_mics)]
+    starts = list(range(0, n_samples, block))
+
+    for start in tqdm(starts, desc="Isolating", disable=not verbose):
+        stop = min(start + block, n_samples)
+        # pad the block so STFT edge effects fall outside the part we keep
+        a = max(0, start - pad)
+        b = min(n_samples, stop + pad)
+
+        specs = np.array([stft(t[a:b], fs=rate, nperseg=cfg.nperseg,
+                               noverlap=cfg.noverlap)[2] for t in tracks],
+                         dtype=np.complex64)
+        mags = np.abs(specs)
+        top1, top2, argmax = max_excluding(mags)
+        frame0 = a // hop
+
+        for i in range(n_mics):
+            other = np.where(argmax == i, top2, top1)
+            mask = dominance_mask(mags[i], other, cfg)
+
+            p = presence[i][frame0:frame0 + mask.shape[1]]
+            if len(p) < mask.shape[1]:
+                p = np.pad(p, (0, mask.shape[1] - len(p)), mode='edge')
+            mask *= (cfg.residual_floor + (1.0 - cfg.residual_floor) * p)[None, :]
+            masked = specs[i] * mask
+
+            if ambience[i] is not None:
+                # Bury whatever survived the floor under noise at the same spectral
+                # shape, weighted by how sure we are the target is *not* speaking, so
+                # nothing is added over their own voice.
+                noise = shaped_noise_spectrum(a, b - a, ambience[i], cfg, i)
+                resid = np.sqrt(np.mean(np.abs(masked) ** 2, axis=0)) + 1e-20
+                nlevel = np.sqrt(np.mean(np.abs(noise) ** 2, axis=0)) + 1e-20
+                k = min(len(resid), len(nlevel), len(p))
+                scale = np.zeros(noise.shape[1], dtype=np.float32)
+                scale[:k] = (resid[:k] / nlevel[:k]
+                             * 10 ** (cfg.residual_noise_over_db / 20)
+                             * (1.0 - p[:k]))
+                masked = masked + noise * scale[None, :]
+
+            rec = istft(masked, fs=rate, nperseg=cfg.nperseg,
+                        noverlap=cfg.noverlap)[1]
+            rec = rec[:b - a] if len(rec) >= b - a else np.pad(rec, (0, b - a - len(rec)))
+            out[i][start:stop] = rec[start - a:stop - a]
+
+        del specs, mags, top1, top2, argmax
+
+    # --- one output gain for the whole session -----------------------------
+    # Per-track peak normalisation, as the v2 entry points did, makes every
+    # track's level depend on its own worst transient and destroys the level
+    # relationships between people that downstream acoustic features rely on.
+    out_levels = [frame_levels(o, hop) for o in out]
+    ref = float(np.median([speech_level(l, cfg.speech_level_percentile)
+                           for l in out_levels]))
+    g = 10 ** (cfg.output_level_db / 20) / max(ref, 1e-12)
+    peak = max(float(np.abs(o).max()) for o in out) * g
+    limit = 10 ** (cfg.peak_limit_db / 20)
+    if peak > limit:
+        g *= limit / peak
+    out = [(o * g).astype(np.float32) for o in out]
+
+    return {
+        'rate': rate,
+        'audio': out,
+        'speech_probability': [p.astype(np.float32) for p in presence],
+        'frame_rate': cfg.frame_rate,
+        'hop': hop,
+        'calibration': cal_info,
+        'noise_floor_db': [round(20 * np.log10(f), 2) for f in floors],
+        'output_gain_db': round(20 * np.log10(g), 2),
+        'config': cfg.to_dict(),
+        'files': [os.path.basename(f) for f in file_list],
+    }
