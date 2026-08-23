@@ -63,8 +63,27 @@ class IsolationConfig:
     # It removes every word transcribed over the target's own silence, but costs
     # ~4.3% of that speaker's real words to do it -- and the cost is a step, not a
     # slope, so it comes from adding any noise at all rather than from its level.
-    # Worth enabling when a stray word attributed to the wrong speaker is more
-    # costly than a missing one, or for human listening; otherwise leave it off.
+    #
+    # Leakage does not get worse with more microphones. On the four-person session
+    # 2024-09-27_000, 6944 words across four tracks with the fill off:
+    #
+    #                       words over own-VAD silence   words matching another track
+    #   all four tracks              30  (0.4%)                    96  (1.4%)
+    #   worst track (T01)            19  (1.4%)                    35  (2.6%)
+    #   two-person reference         10  (0.7%)                     6  (0.4%)
+    #
+    # The 1.4% text figure is mostly an artefact of the test: repeating it with the
+    # timestamps shifted by a third of the session -- destroying any real temporal
+    # relationship -- still flags 0.6%, so barely half the matches exceed chance.
+    # 48% of the flagged tokens are backchannels ('yeah' x17, 'no' x10), which
+    # genuinely are said simultaneously by different people. The two metrics never
+    # agree on a single word at either session size, so neither is a clean ground
+    # truth; real leakage is well under 1% of words.
+    #
+    # Since the fill costs ~4.3% of a speaker's own words to remove at most ~1-2%,
+    # the trade does not pay off at either session size. Worth enabling anyway when
+    # a stray word attributed to the wrong speaker is more costly than a missing
+    # one, or for human listening; otherwise leave it off.
     residual_noise_over_db: float = None   # dB above the residual it is burying
     ambience_seconds: float = 20.0        # quiet audio sampled to shape the noise
     seed: int = 0

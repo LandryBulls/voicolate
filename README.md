@@ -99,6 +99,13 @@ run-to-run noise). On `2024-05-22_000` TRACK01, of 1486 transcribed words, 10 fa
 where that speaker's own VAD says they were silent and 6 match a word TRACK02 said at
 the same moment -- 0.4-0.7% either way.
 
+Leakage does not worsen with more microphones. On the four-person `2024-09-27_000`
+(6944 words across four tracks) the same two measures give 0.4% and 1.4% -- and
+repeating the second test with timestamps shifted by a third of the session still
+flags 0.6%, so barely half of those matches exceed chance, and 48% of the flagged
+tokens are backchannels ("yeah" x17, "no" x10) that genuinely do overlap between
+speakers.
+
 `residual_noise_over_db` fills the suppressed regions with ambience-shaped noise and
 removes all 10 of the first kind, but costs ~4.3% of the speaker's own words, at every
 level tested (+3, +6, +12 dB -- the cost is a step, not a slope). It is therefore
