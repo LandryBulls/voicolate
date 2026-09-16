@@ -14,6 +14,21 @@ python scripts/isolate_session.py /path/to/sessions --all   # every session unde
 python scripts/isolate_session.py /path/to/session --force  # reprocess
 ```
 
+For the whole dataset, three idempotent scripts in order -- stage the raw tracks from
+andromeda, isolate, transcribe. The first two run in `base`; the third needs whisperx
+and runs in `annotate`:
+
+```bash
+/safestore/users/landry/miniconda3/bin/python scripts/stage_raw_audio.py && \
+/safestore/users/landry/miniconda3/bin/python scripts/isolate_all_sessions.py && \
+/safestore/users/landry/miniconda3/envs/annotate/bin/python scripts/transcribe_all_sessions.py
+```
+
+Each skips work already done, logs to `session_data/`, and carries on past a failed
+session. `--sessions <id> ...` restricts any of them; `_remove` sessions are skipped
+unless `--include-removed`. The isolation step ends by collecting every session's QC
+into `isolation_v3_qc_summary.csv` and printing the tracks worth listening to.
+
 Each run writes, into the session's `processed/`:
 
 | file | contents |
