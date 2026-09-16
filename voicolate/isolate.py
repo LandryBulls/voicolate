@@ -1040,7 +1040,7 @@ def isolate_v3(file_list, config=None, verbose=True):
     floors = [noise_floor(l, cfg.noise_floor_percentile) for l in levels]
     if verbose:
         print(f"  gains (dB):        {cal_info['gains_db']}")
-        print(f"  noise floor (dBFS): {[round(20 * np.log10(f), 1) for f in floors]}")
+        print(f"  noise floor (dBFS): {[round(float(20 * np.log10(f)), 1) for f in floors]}")
 
     # --- pass 2: frame-rate speech presence, from band-limited envelopes ----
     if verbose:

@@ -111,13 +111,8 @@ def isolate_session(session, cfg, force=False, run_qc=True):
     return True
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('path', type=Path, help='session directory, or a directory of them')
-    p.add_argument('--all', action='store_true', help='process every session under path')
-    p.add_argument('--force', action='store_true', help='reprocess existing outputs')
-    p.add_argument('--no-qc', action='store_true', help='skip the QC pass')
+def add_config_args(p):
+    """Config overrides shared by every entry point; None means keep the default."""
     p.add_argument('--calibration', default=None,
                    choices=['speech_level', 'bleed_symmetry', 'rms', 'none'])
     p.add_argument('--dominance-margin-db', type=float, default=None)
@@ -132,11 +127,24 @@ def main():
                         'words but costs ~4%% of the target\'s own words -- see config.py)')
     p.add_argument('--hangover-ms', type=float, default=None)
     p.add_argument('--block-seconds', type=float, default=None)
-    args = p.parse_args()
 
+
+def config_from_args(args):
     overrides = {k: v for k, v in vars(args).items()
                  if v is not None and k in IsolationConfig.__dataclass_fields__}
-    cfg = IsolationConfig(**overrides)
+    return IsolationConfig(**overrides)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('path', type=Path, help='session directory, or a directory of them')
+    p.add_argument('--all', action='store_true', help='process every session under path')
+    p.add_argument('--force', action='store_true', help='reprocess existing outputs')
+    p.add_argument('--no-qc', action='store_true', help='skip the QC pass')
+    add_config_args(p)
+    args = p.parse_args()
+    cfg = config_from_args(args)
 
     if not args.path.exists():
         print(f"path does not exist: {args.path}")
