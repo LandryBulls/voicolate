@@ -29,6 +29,12 @@ session. `--sessions <id> ...` restricts any of them; `_remove` sessions are ski
 unless `--include-removed`. The isolation step ends by collecting every session's QC
 into `isolation_v3_qc_summary.csv` and printing the tracks worth listening to.
 
+Transcripts are letter-named by sorted track order, as the pipeline does it
+(TRACK01 -> A, ...), and land in `{letter}_transcript_v3.json`. The pipeline itself
+reads `{letter}_transcript_with_nonwords.json`, which still holds the v2-derived
+transcripts; `--pipeline-names` writes there instead, replacing them, for when the
+downstream analyses are ready to move to v3.
+
 Each run writes, into the session's `processed/`:
 
 | file | contents |
