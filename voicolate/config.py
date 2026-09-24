@@ -23,7 +23,13 @@ class IsolationConfig:
     # 'bleed_symmetry' solve for gains that symmetrise the measured bleed matrix
     # 'rms'            legacy: equalise overall RMS (biased by how much each person talked)
     # 'none'           leave levels as recorded
-    calibration: str = 'speech_level'
+    # 'bleed_symmetry' is the default because 'speech_level' equalises a number
+    # the microphone gain contaminates: on 2023-09-21_000 it gave TRACK01 +25.0 dB
+    # and TRACK03 +12.6 dB, so C's voice reached A's mic at -13.7 dB while A's
+    # reached C's at -34.3 dB. A 20.6 dB asymmetry between one pair of people in
+    # one room is a gain artefact, and it leaves the dominance test a 2 dB margin
+    # to work with. Symmetrising put every pair at -20 to -27 dB.
+    calibration: str = 'bleed_symmetry'
     target_level_db: float = -20.0
     noise_floor_percentile: float = 5.0
     speech_level_percentile: float = 95.0
@@ -35,6 +41,11 @@ class IsolationConfig:
     smoothing_freq_bins: int = 5
     smoothing_time_frames: int = 3
     harmonicity_weight: float = 0.0     # broadband flatness term; off by default
+    # Close a bin only where the mic beating it is itself this far above its own
+    # noise floor in that bin (its `ambience_spectrum`). None closes on dominance
+    # alone, the pre-2026-09 behaviour, which faded the tail of every word as its
+    # bins fell to the floor. See `dominance_mask`.
+    mask_competitor_snr_db: float = 8.0
 
     # --- frame-level speech presence (replaces the peak-referenced soft gate) ---
     speech_band_hz: Tuple[float, float] = (100.0, 8000.0)
@@ -42,7 +53,19 @@ class IsolationConfig:
     presence_snr_db: float = 8.0        # dB above this track's own noise floor
     presence_snr_width_db: float = 6.0
     hangover_ms: float = 250.0          # symmetric: protects onsets and unvoiced offsets
-    residual_floor_db: float = -20.0    # hard limit on total attenuation; never silence
+    # The hangover may restore a frame the SNR test lost, but not overrule one
+    # where another mic is measurably leading *and* above its own noise floor;
+    # leading in silence is not evidence of anything. Set False for the pre-2026-09
+    # behaviour, which let a listener's backchannel open their gate over half a
+    # second of the speaker's audio on either side of it. See `speech_presence`.
+    hangover_respects_dominance: bool = True
+    # Hard limit on total attenuation; never silence. This is a guardrail against
+    # the v2 failure (an unbounded gate destroying the target's own quiet speech),
+    # not a judgement about how loud bleed may be -- and it only binds once the
+    # presence decision is already near zero. When bleed survives at p ~ 0.5 the
+    # floor is irrelevant: lowering it to -inf then buys ~0.1 dB. Fix the presence
+    # decision first and this number second.
+    residual_floor_db: float = -40.0
 
     # --- comfort-noise substitution (opt-in) ---
     # Floored suppression leaves the interfering voice quiet but structurally intact.

@@ -103,8 +103,7 @@ def isolate_session(session, cfg, force=False, run_qc=True):
         # QC the audio that was actually written, not the float array it came from:
         # int16 quantisation is part of the artefact downstream tools will read
         written = [to_int16(a).astype(np.float32) / 32768.0 for a in result['audio']]
-        qc = session_qc(raw, written, rate, hop=result['hop'], names=stems,
-                        residual_floor_db=cfg.residual_floor_db)
+        qc = session_qc(raw, written, rate, hop=result['hop'], names=stems)
         (processed / f'{session.name}_isolation_qc.json').write_text(
             json.dumps(qc, indent=2))
         print(format_report(qc, session.name))
@@ -118,7 +117,12 @@ def add_config_args(p):
     p.add_argument('--dominance-margin-db', type=float, default=None)
     p.add_argument('--dominance-width-db', type=float, default=None)
     p.add_argument('--residual-floor-db', type=float, default=None,
-                   help='hard limit on total attenuation (default -20)')
+                   help='hard limit on total attenuation (default -40)')
+    p.add_argument('--no-hangover-dominance', dest='hangover_respects_dominance',
+                   action='store_false', default=None,
+                   help="let the presence hangover overrule live dominance evidence "
+                        "(pre-2026-09 behaviour; a listener's backchannel then opens "
+                        "their gate over the speaker either side of it)")
     p.add_argument('--presence-snr-db', type=float, default=None,
                    help='dB above a track\'s own noise floor for speech presence')
     p.add_argument('--residual-noise-over-db', type=float, default=None,

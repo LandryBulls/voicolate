@@ -18,10 +18,13 @@ from .calibrate import frame_levels, noise_floor, speech_level
 # a track failing any of these is worth looking at by ear
 WARN_SPEECH_CUT_12 = 0.03      # fraction of clear speech frames attenuated >12 dB
 WARN_SPEECH_SILENCED_S = 0.5   # seconds of clear speech driven to exact zero
-# Bleed rejection is capped by design: `residual_floor_db` is the most the
-# suppressor may ever attenuate, so the useful question is whether it reaches its
-# own floor, not whether it beats some absolute number.
-WARN_BLEED_MARGIN_DB = 2.0
+# Bleed rejection was once capped by design, so this asked whether a track reached
+# its own `residual_floor_db` rather than whether it beat any absolute number. That
+# stops working as the floor drops: below about -30 dB the presence decision, not
+# the floor, is what limits bleed, and a floor-relative test then fires on every
+# track while saying nothing about whether the bleed is audible. Judge against an
+# absolute level, which is what a listener and an ASR model both do.
+WARN_BLEED_DB = -25.0
 
 
 def _db(x):
@@ -59,7 +62,7 @@ def speech_silenced_seconds(out, speech_frames, rate, hop):
     return float((silent & speech_frames[:n]).sum()) * hop / rate
 
 
-def track_qc(raw, out, others_levels, rate, hop=512, residual_floor_db=-20.0,
+def track_qc(raw, out, others_levels, rate, hop=512,
              dominance_db=6.0, above_floor_db=12.0, bleed_dominance_db=-6.0):
     """Compare one isolated track against the calibrated raw track it came from."""
     e_raw = frame_levels(raw, hop)
@@ -115,25 +118,23 @@ def track_qc(raw, out, others_levels, rate, hop=512, residual_floor_db=-20.0,
     if q['speech_silenced_s'] > WARN_SPEECH_SILENCED_S:
         warnings.append(
             f"{q['speech_silenced_s']:.1f} s of clear speech driven to digital silence")
-    bleed_limit = residual_floor_db + WARN_BLEED_MARGIN_DB
-    if 'bleed_gain_median_db' in q and q['bleed_gain_median_db'] > bleed_limit:
+    if 'bleed_gain_median_db' in q and q['bleed_gain_median_db'] > WARN_BLEED_DB:
         warnings.append(
-            f"bleed only attenuated {q['bleed_gain_median_db']:.1f} dB; the "
-            f"{residual_floor_db:.0f} dB residual floor should reach {bleed_limit:.0f} dB")
+            f"bleed only attenuated {q['bleed_gain_median_db']:.1f} dB "
+            f"(limit {WARN_BLEED_DB:.0f} dB); another speaker is likely audible "
+            f"and transcribable on this track")
     q['warnings'] = warnings
     return q
 
 
-def session_qc(raw_tracks, out_tracks, rate, hop=512, names=None,
-               residual_floor_db=-20.0):
+def session_qc(raw_tracks, out_tracks, rate, hop=512, names=None):
     """QC every track in a session. `raw_tracks` must be the calibrated raw audio."""
     levels = [frame_levels(t, hop) for t in raw_tracks]
     names = names or [f'track{i}' for i in range(len(raw_tracks))]
     tracks = {}
     for i, (raw, out) in enumerate(zip(raw_tracks, out_tracks)):
         others = [levels[j] for j in range(len(levels)) if j != i]
-        tracks[names[i]] = track_qc(raw, out, others, rate, hop=hop,
-                                    residual_floor_db=residual_floor_db)
+        tracks[names[i]] = track_qc(raw, out, others, rate, hop=hop)
     return {
         'tracks': tracks,
         'n_warnings': sum(len(t['warnings']) for t in tracks.values()),

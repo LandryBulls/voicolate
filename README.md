@@ -59,13 +59,16 @@ leads every other microphone by a wide margin -- median 27 dB, measured. Decidin
 who owns each time-frequency bin is therefore mostly easy, and the whole problem is
 in handling the frames where it is not.
 
-1. **Calibration.** Per-track gains that put the microphones on a common footing,
-   from the 95th-percentile frame level (`calibration='speech_level'`, the default)
-   or by symmetrising the measured bleed matrix (`'bleed_symmetry'`). Both are
-   invariant to how much each person talked.
+1. **Calibration.** Per-track gains that put the microphones on a common footing, by
+   symmetrising the measured bleed matrix (`calibration='bleed_symmetry'`, the
+   default) or from the 95th-percentile frame level (`'speech_level'`). Both are
+   invariant to how much each person talked; only the first is invariant to
+   microphone gain, which is why it is the default.
 2. **Time-frequency mask.** A soft, floored sigmoid on cross-microphone dominance.
 3. **Speech presence.** A per-frame probability combining dominance across the array
-   with level above *that track's own noise floor*, with a symmetric hangover.
+   with level above *that track's own noise floor*, with a symmetric hangover that
+   may restore a frame the level test lost but may not overrule live dominance
+   evidence (`hangover_respects_dominance`).
 4. **Suppression.** Bounded by `residual_floor_db`, so nothing is ever destroyed.
 
 Processing is blocked, so peak memory does not depend on session length or on the
@@ -112,6 +115,41 @@ distinguishes the v2 failure from harmless int16 quantisation of a residual alre
 100 dB below speech. Thresholds are in `voicolate/qc.py`.
 
 ## Residual bleed and ASR
+
+### Where the leak actually comes from
+
+Two failures on `2023-09-21_000` are worth recording, because in both cases the
+obvious lever -- attenuate harder -- was the wrong one.
+
+**Microphone gain, read as a speaker.** `speech_level` calibration gave TRACK01
++25.0 dB and TRACK03 +12.6 dB. C's voice then reached A's mic at -13.7 dB while A's
+reached C's at -34.3 dB: a 20.6 dB asymmetry between two people in one room, which is
+a gain artefact rather than acoustics. It left the dominance test a 2 dB margin, so
+the mask barely closed and 35.7% of A's transcribed words were someone else's.
+`bleed_symmetry` put every pair at -20 to -27 dB and took that to 3.6%, while C's own
+word count moved 3092 -> 3079.
+
+**A backchannel opening the gate over the speaker.** The presence hangover was a plain
+`maximum_filter1d`, and in conversation the frames adjacent to a listener's backchannel
+are exactly the frames where somebody else holds the floor. On TRACK02, over the 28.6 s
+at 18:52 where TRACK03 leads by 15.9 dB, 2.91 s of evidence dilated to 13.78 s and left
+the bleed at **-6.0 dB** -- loud enough that WhisperX transcribed it, and looped on it.
+`residual_floor_db` cannot reach this: at p ~ 0.5 there is nothing to clamp, and
+lowering the floor to -inf gains **0.1 dB**. Re-applying the dominance term after the
+dilation takes the same frames to -39.3 dB. Pooled over all four tracks:
+
+| frame class | n | old | new |
+|---|---|---|---|
+| target leads >6 dB (clear speech) | 124148 | -0.0 dB | **-0.0 dB** |
+| target leads 3-6 dB | 9751 | -0.0 dB | -1.9 dB |
+| within +/-3 dB (genuine overlap) | 21392 | -0.3 dB | -7.2 dB |
+| target trails 3-10 dB | 28908 | -3.1 dB | -23.3 dB |
+| target trails >10 dB (bleed) | 265717 | -13.6 dB | **-39.8 dB** |
+
+Clear speech is untouched; the cost falls entirely on frames where two microphones are
+genuinely within a few dB, which is real simultaneous speech rather than bleed. Note
+the bleed row now sits *at* the -40 dB floor, so from here the floor is the binding
+constraint again and lowering it does something -- which it did not before.
 
 After v3, what survives suppression is quiet but structurally intact, and audible on
 close listening. Whether that matters was measured rather than assumed, with WhisperX

@@ -899,7 +899,7 @@ def _harmonicity(target_mag, eps=1e-10):
     return np.clip(1.0 - gm / (am + eps), 0.0, 1.0)
 
 
-def dominance_mask(target_mag, other_mag, cfg):
+def dominance_mask(target_mag, other_mag, cfg, other_snr=None):
     """Soft, floored time-frequency mask from cross-microphone dominance.
 
     The v2 mask ramps linearly from fully closed to fully open across +/- the
@@ -907,6 +907,14 @@ def dominance_mask(target_mag, other_mag, cfg):
     sharpness buys nothing where the answer is obvious and destroys the frames
     where it is genuinely ambiguous. This uses a wider sigmoid and never closes
     a bin completely, which also suppresses musical noise.
+
+    `other_snr`, when given, is the loudest other mic's power over its *own*
+    per-bin noise floor (see `competitor_snr`), and restricts closing a bin to
+    where that mic has something in it. Where every mic sits at its floor,
+    dominance compares one mic's noise with the loudest of N-1 others and comes
+    out a few dB negative, so the tail of a word -- whose bins reach the floor
+    one by one -- was closed along with the silence after it. On 2023-10-03_003
+    that faded the last 20-70 ms of each utterance by a further 5-9 dB.
     """
     eps = 1e-10
     dominance_db = 20 * np.log10((target_mag + eps) / (other_mag + eps))
@@ -920,10 +928,30 @@ def dominance_mask(target_mag, other_mag, cfg):
     if cfg.smoothing_freq_bins > 1 or cfg.smoothing_time_frames > 1:
         mask = uniform_filter(mask, mode='nearest',
                               size=(cfg.smoothing_freq_bins, cfg.smoothing_time_frames))
+
+    if other_snr is not None:
+        active = _sigmoid((10 * np.log10(other_snr + eps) - cfg.mask_competitor_snr_db)
+                          / (cfg.presence_snr_width_db / 4.0))
+        mask = 1.0 - (1.0 - mask) * active
     return mask
 
 
-def speech_presence(band_levels, target_idx, floor, cfg):
+def competitor_snr(mags, bin_floors, cfg):
+    """Every bin's power over its own mic's noise floor, shape `(n_mics, F, T)`.
+
+    `bin_floors` is each mic's `ambience_spectrum`, `(n_mics, F)`, measured once
+    for the whole session so blocking cannot move it. Power is smoothed over the
+    same neighbourhood as the mask, so the scatter of a single noise bin cannot
+    pass for a competing voice. Reduce with `max_excluding` to get, for each
+    target, the loudest *other* mic.
+    """
+    pw = uniform_filter(mags ** 2, mode='nearest',
+                        size=(1, cfg.smoothing_freq_bins, cfg.smoothing_time_frames))
+    pw /= np.asarray(bin_floors)[:, :, None] ** 2 + 1e-20
+    return pw
+
+
+def speech_presence(band_levels, target_idx, floors, cfg):
     """Per-frame probability that the target is the one speaking.
 
     Two independent pieces of evidence, both required:
@@ -937,19 +965,51 @@ def speech_presence(band_levels, target_idx, floor, cfg):
 
     The hangover is symmetric, so one dilation protects both onsets and the
     low-energy unvoiced tails that a release-only gate clips off.
+
+    `hangover_respects_dominance` then re-applies the dominance term to the
+    dilated result, so the hangover can restore a frame the SNR test lost but
+    cannot overrule a frame where another microphone is measurably leading.
+    Without it the dilation is a plain maximum filter, and in conversation the
+    frames next to a listener's backchannel are exactly the frames where the
+    speaker holds the floor -- so a backchannel opens that listener's gate over
+    half a second of somebody else's speech. On 2023-09-21_000 TRACK02, over the
+    28.6 s at 18:52 where TRACK03 leads by 15.9 dB, 2.91 s of evidence dilates to
+    13.78 s and leaves the bleed at -6.0 dB; re-applying dominance puts it at
+    -39.3 dB, with 0.000% of clear speech frames attenuated >6 dB on any of the
+    four tracks. The residual floor cannot reach this: at p ~ 0.5 there is
+    nothing for it to clamp, and removing it entirely gains 0.1 dB.
+
+    The veto only counts where the leading mic is itself above its own floor
+    (`floors` holds every mic's, or one value shared by all). In silence nobody
+    leads, but the loudest of N-1 noise floors still beats one, so an unqualified
+    veto sits at -13 to -20 dB there -- which, in the hangover around a word, is
+    exactly where it lands. The gain then rode the speech envelope instead of
+    holding under it: on 2023-10-03_003 a word's first frames rose from -28 dB
+    and its tail faded by up to 16 dB, where the hangover should hold both at 0.
+    Qualifying the veto moves bleed rejection by under 1.5 dB.
     """
     L = np.asarray(band_levels)
+    floors = np.broadcast_to(np.asarray(floors, dtype=np.float64), (len(L),))
     target = L[target_idx]
     others = np.max(np.delete(L, target_idx, axis=0), axis=0)
 
     dominance_db = 20 * np.log10(target / others)
-    snr_db = 20 * np.log10(target / floor)
+    snr_db = 20 * np.log10(target / floors[target_idx])
 
-    p = (_sigmoid(dominance_db / cfg.presence_dominance_width_db)
-         * _sigmoid((snr_db - cfg.presence_snr_db) / (cfg.presence_snr_width_db / 4.0)))
+    dominance = _sigmoid(dominance_db / cfg.presence_dominance_width_db)
+    p = dominance * _sigmoid(
+        (snr_db - cfg.presence_snr_db) / (cfg.presence_snr_width_db / 4.0))
 
     hang = max(1, int(round(cfg.hangover_ms / 1000.0 * cfg.frame_rate)))
-    return maximum_filter1d(p, size=2 * hang + 1, mode='nearest')
+    p = maximum_filter1d(p, size=2 * hang + 1, mode='nearest')
+    if not cfg.hangover_respects_dominance:
+        return p
+
+    other_snr_db = 20 * np.log10(np.max(
+        np.delete(L / floors[:, None], target_idx, axis=0), axis=0))
+    other_active = _sigmoid(
+        (other_snr_db - cfg.presence_snr_db) / (cfg.presence_snr_width_db / 4.0))
+    return p * (1.0 - (1.0 - dominance) * other_active)
 
 
 def ambience_spectrum(track, levels, cfg, seconds=20.0):
@@ -1049,17 +1109,30 @@ def isolate_v3(file_list, config=None, verbose=True):
     for t in tqdm(tracks, desc="Band levels", disable=not verbose):
         band.append(frame_levels(_bandpass(t, rate, cfg.speech_band_hz), hop))
     band_floors = [noise_floor(b, cfg.noise_floor_percentile) for b in band]
-    presence = [speech_presence(band, i, band_floors[i], cfg) for i in range(n_mics)]
+    presence = [speech_presence(band, i, band_floors, cfg) for i in range(n_mics)]
     del band
 
+    # The room's spectrum through each mic, measured once here so that neither
+    # the mask's noise floors nor the comfort noise depend on how the session is
+    # later split into blocks.
+    gated = cfg.mask_competitor_snr_db is not None
     ambience = [None] * n_mics
-    if cfg.fills_residual:
+    if cfg.fills_residual or gated:
         ambience = [ambience_spectrum(t, l, cfg, cfg.ambience_seconds)
                     for t, l in zip(tracks, levels)]
-        if verbose:
-            missing = [i for i, a in enumerate(ambience) if a is None]
-            print(f"Comfort noise at {cfg.residual_noise_over_db:+.0f} dB over the residual"
-                  + (f" (no ambience for tracks {missing})" if missing else ""))
+    bin_floors = None
+    if gated:
+        # too short to sample quiet windows from: fall back on the whole track
+        bin_floors = np.array([
+            a if a is not None else np.median(np.abs(stft(
+                t, fs=rate, nperseg=cfg.nperseg, noverlap=cfg.noverlap)[2]), axis=1)
+            for a, t in zip(ambience, tracks)], dtype=np.float32)
+    if not cfg.fills_residual:
+        ambience = [None] * n_mics
+    elif verbose:
+        missing = [i for i, a in enumerate(ambience) if a is None]
+        print(f"Comfort noise at {cfg.residual_noise_over_db:+.0f} dB over the residual"
+              + (f" (no ambience for tracks {missing})" if missing else ""))
 
     # --- pass 3: blocked time-frequency masking ----------------------------
     block = max(1, int(cfg.block_seconds * rate) // hop) * hop
@@ -1079,10 +1152,13 @@ def isolate_v3(file_list, config=None, verbose=True):
         mags = np.abs(specs)
         top1, top2, argmax = max_excluding(mags)
         frame0 = a // hop
+        if gated:
+            snr1, snr2, snr_arg = max_excluding(competitor_snr(mags, bin_floors, cfg))
 
         for i in range(n_mics):
             other = np.where(argmax == i, top2, top1)
-            mask = dominance_mask(mags[i], other, cfg)
+            other_snr = np.where(snr_arg == i, snr2, snr1) if gated else None
+            mask = dominance_mask(mags[i], other, cfg, other_snr)
 
             p = presence[i][frame0:frame0 + mask.shape[1]]
             if len(p) < mask.shape[1]:
@@ -1110,6 +1186,8 @@ def isolate_v3(file_list, config=None, verbose=True):
             out[i][start:stop] = rec[start - a:stop - a]
 
         del specs, mags, top1, top2, argmax
+        if gated:
+            del snr1, snr2, snr_arg
 
     # --- one output gain for the whole session -----------------------------
     # Per-track peak normalisation, as the v2 entry points did, makes every

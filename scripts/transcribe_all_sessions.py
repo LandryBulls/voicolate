@@ -2,13 +2,15 @@
 """Transcribe every session's v3-isolated tracks with WhisperX.
 
 Third step after `stage_raw_audio.py` and `isolate_all_sessions.py`. Runs in the
-``annotate`` conda env, the only one with whisperx and CUDA:
+``whisperx`` conda env (whisperx 3.8.6, faster-whisper 1.2.1, torch 2.8 cu128);
+the older ``annotate`` env is whisperx 3.1.1 and is kept only to reproduce the
+transcripts it made:
 
-    /safestore/users/landry/miniconda3/envs/annotate/bin/python scripts/transcribe_all_sessions.py
+    /safestore/users/landry/miniconda3/envs/whisperx/bin/python scripts/transcribe_all_sessions.py
 
 Reuses `groupconv.extract.transcription.TranscriptionExtractor` -- the same class,
-model (WhisperX large-v2 + alignment) and JSON schema the extraction pipeline uses
-for the v2 transcripts -- so the output is a drop-in replacement.
+model (WhisperX large-v3 + alignment) and JSON schema the extraction pipeline uses
+-- so the output is a drop-in replacement.
 
 Tracks map to person letters the way the pipeline does it, by sorted track order:
 TRACK01 -> A, TRACK02 -> B, TRACK03 -> C, TRACK04 -> D. By default each becomes
@@ -36,7 +38,7 @@ from pathlib import Path
 
 ROOT = Path('/safescratch/groups/session_data')
 GROUPCONV_SRC = Path('/safestore/users/landry/SCRAP/analyses/group_conversation_multimodal/src')
-ANNOTATE_PY = '/safestore/users/landry/miniconda3/envs/annotate/bin/python'
+WHISPERX_PY = '/safestore/users/landry/miniconda3/envs/whisperx/bin/python'
 AUDIO_SUFFIX = '_trimmed_isolated_v3.wav'
 LETTERS = 'ABCD'
 
@@ -69,10 +71,10 @@ def load_extractor(device):
         import whisperx  # noqa: F401
     except ImportError:
         sys.exit(f"whisperx is not importable from {sys.executable}\n"
-                 f"run this script with the annotate env:\n  {ANNOTATE_PY} {' '.join(sys.argv)}")
+                 f"run this script with the whisperx env:\n  {WHISPERX_PY} {' '.join(sys.argv)}")
     sys.path.insert(0, str(GROUPCONV_SRC))
     from groupconv.extract.transcription import TranscriptionExtractor
-    return TranscriptionExtractor({'method': 'whisperx', 'model': 'large-v2',
+    return TranscriptionExtractor({'method': 'whisperx', 'model': 'large-v3',
                                    'device': device, 'output_format': 'json'})
 
 
@@ -124,7 +126,7 @@ def main():
             log(fh, "nothing to do"); return 0
 
         extractor = load_extractor(args.device)
-        log(fh, f"loaded WhisperX large-v2 on {args.device}")
+        log(fh, f"loaded WhisperX large-v3 on {args.device}")
 
         done, failed = 0, []
         t0 = time.time()

@@ -138,15 +138,84 @@ def test_speech_presence_needs_both_dominance_and_level():
 
 
 def test_hangover_is_symmetric():
-    """Protects onsets as well as unvoiced offsets; v2's release-only gate clipped both."""
+    """Protects onsets as well as unvoiced offsets; v2's release-only gate clipped both.
+
+    The quiet frames around the burst carry a small lead on the target's own mic,
+    which is what a real onset looks like: the talker's own microphone picks up the
+    approach to a syllable before any other does. With the levels exactly tied the
+    hangover still opens the gate, but only to 0.5 -- see the test below.
+    """
     cfg = IsolationConfig(hangover_ms=100.0)
     n = 400
     lev = np.full((2, n), 1e-5)
+    lev[0] *= 4.0                          # target's mic leads by 12 dB throughout
     lev[0, 200:210] = 1e-1
     p = speech_presence(lev, 0, 1e-5, cfg)
     hang = int(round(cfg.hangover_ms / 1000 * cfg.frame_rate))
     assert p[200 - hang + 1] > 0.9, "gate must be open before the onset"
     assert p[210 + hang - 1] > 0.9, "gate must stay open past the offset"
+
+
+def test_hangover_holds_when_every_mic_is_at_its_floor():
+    """In silence the loudest of N-1 noise floors beats one; that is not a speaker.
+
+    Pins the ramp this produced: vetoing on that lead held the hangover at -13 to
+    -20 dB right up to a word, so the gain rose with its onset and fell with its
+    tail instead of holding under both.
+    """
+    cfg = IsolationConfig(hangover_ms=100.0)
+    n = 400
+    floor = 1e-5
+    lev = np.full((4, n), floor)
+    lev[1:] *= 1.8                         # every other mic's noise leads by 5 dB
+    lev[0, 200:210] = 1e-1
+    p = speech_presence(lev, 0, [floor] + [floor * 1.8] * 3, cfg)
+    hang = int(round(cfg.hangover_ms / 1000 * cfg.frame_rate))
+    assert p[200 - hang + 1] > 0.9, f"hangover held at {p[200 - hang + 1]:.3f} before onset"
+    assert p[210 + hang - 1] > 0.9, f"hangover held at {p[210 + hang - 1]:.3f} past offset"
+    assert p[50] < 0.1, "silence outside the hangover must still close"
+
+
+def test_mask_only_closes_against_an_active_competitor():
+    cfg = IsolationConfig(smoothing_freq_bins=1, smoothing_time_frames=1)
+    target = np.ones((8, 2), dtype=np.float32)
+    other = np.full((8, 2), 2.0, dtype=np.float32)            # other leads by 6 dB
+    snr = np.tile(np.array([1.0, 1000.0]), (8, 1))           # at its floor / 30 dB over
+    m = dominance_mask(target, other, cfg, snr)
+    assert m[:, 0].min() > 0.95, "a competitor at its own floor must not close the bin"
+    assert m[:, 1].max() < 0.3, "an active competitor must still close it"
+
+
+def test_hangover_cannot_overrule_another_mic():
+    """A backchannel must not open this track's gate over the speaker either side of it.
+
+    The failure this pins: in conversation the frames next to a listener's
+    backchannel are precisely the frames where somebody else holds the floor, so a
+    plain maximum filter hands them a wide-open gate. Measured on 2023-09-21_000
+    TRACK02 this left 28.6 s of TRACK03's speech at -6 dB -- audible, and
+    transcribed onto the wrong person. The residual floor cannot catch it: at
+    p ~ 0.5 there is nothing to clamp.
+    """
+    cfg = IsolationConfig(hangover_ms=100.0)
+    n = 400
+    quiet, loud = 1e-5, 1e-1
+    lev = np.full((2, n), quiet)
+    lev[1, 100:300] = loud                 # track 1 holds the floor throughout
+    lev[0, 195:205] = loud * 2             # track 0 backchannels over the top of it
+    p = speech_presence(lev, 0, quiet, cfg)
+    hang = int(round(cfg.hangover_ms / 1000 * cfg.frame_rate))
+
+    # a real backchannel leads on its own mic, so it survives; only the frames
+    # around it, where it has no evidence of its own, are held shut
+    assert p[200] > 0.7, "the backchannel itself must still come through"
+    for i in (195 - hang + 1, 205 + hang - 1):
+        assert p[i] < 0.1, (
+            f"hangover opened the gate to {p[i]:.3f} at frame {i}, where the other "
+            "mic leads by 80 dB")
+
+    cfg_off = IsolationConfig(hangover_ms=100.0, hangover_respects_dominance=False)
+    p_off = speech_presence(lev, 0, quiet, cfg_off)
+    assert p_off[195 - hang + 1] > 0.8, "the opt-out must restore the old behaviour"
 
 
 def test_isolate_v3_never_destroys_speech(tmp_path):
