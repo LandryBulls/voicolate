@@ -218,6 +218,38 @@ def test_hangover_cannot_overrule_another_mic():
     assert p_off[195 - hang + 1] > 0.8, "the opt-out must restore the old behaviour"
 
 
+def test_veto_fades_instead_of_cutting():
+    """Somebody else starting inside this track's hangover must not cut it off.
+
+    Applied frame by frame, the veto took the gate from open to the floor in one or
+    two frames -- about 2700 times in 2023-09-21_000 -- which cut the tail of the
+    target's own speech like a switch. It now falls at a fixed rate but still lifts
+    at once, so a backchannel's own onset is not faded in.
+    """
+    cfg = IsolationConfig(hangover_ms=250.0, veto_release_ms=100.0)
+    n = 400
+    quiet, loud = 1e-5, 1e-1
+    lev = np.full((2, n), quiet)
+    lev[0, 100:200] = loud                 # target speaks
+    lev[1, 200:300] = loud * 2             # the other mic takes over, louder
+    p = speech_presence(lev, 0, quiet, cfg)
+    g = 20 * np.log10(cfg.residual_floor + (1 - cfg.residual_floor) * p)  # as applied
+
+    per_frame = 40.0 / (cfg.veto_release_ms / 1000 * cfg.frame_rate)
+    assert np.diff(g[195:240]).min() >= -per_frame - 1e-6, "gate fell faster than its release"
+    half = int(round(cfg.veto_release_ms / 2000 * cfg.frame_rate))
+    assert g[200 + half] > -25, f"gate at {g[200 + half]:.1f} dB halfway through the release"
+    assert g[260] < cfg.residual_floor_db + 1, "the release must still reach the floor"
+
+    cut = speech_presence(lev, 0, quiet, IsolationConfig(hangover_ms=250.0,
+                                                         veto_release_ms=None))
+    assert cut[201] < 0.05, "the opt-out must restore the frame-by-frame veto"
+
+    lev[0, 280:290] = loud * 8             # a backchannel: the veto lifts at once
+    p = speech_presence(lev, 0, quiet, cfg)
+    assert p[280] > 0.9, f"backchannel onset faded in, at {p[280]:.3f}"
+
+
 def test_isolate_v3_never_destroys_speech(tmp_path):
     from scipy.io import wavfile
     tracks = synth_array(3, seconds=12, seed=5)

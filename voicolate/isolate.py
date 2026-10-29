@@ -987,6 +987,12 @@ def speech_presence(band_levels, target_idx, floors, cfg):
     holding under it: on 2023-10-03_003 a word's first frames rose from -28 dB
     and its tail faded by up to 16 dB, where the hangover should hold both at 0.
     Qualifying the veto moves bleed rejection by under 1.5 dB.
+
+    The veto is then given a release (`veto_release_ms`): it may lift at once,
+    so onsets and backchannels come through, but may only close the gate at a
+    fixed rate. Applied frame by frame it fell from 0 to -40 dB within one or two
+    frames whenever somebody else started talking inside this track's hangover,
+    which cut the end of the target's own speech off like a switch.
     """
     L = np.asarray(band_levels)
     floors = np.broadcast_to(np.asarray(floors, dtype=np.float64), (len(L),))
@@ -1009,7 +1015,24 @@ def speech_presence(band_levels, target_idx, floors, cfg):
         np.delete(L / floors[:, None], target_idx, axis=0), axis=0))
     other_active = _sigmoid(
         (other_snr_db - cfg.presence_snr_db) / (cfg.presence_snr_width_db / 4.0))
-    return p * (1.0 - (1.0 - dominance) * other_active)
+    veto = 1.0 - (1.0 - dominance) * other_active
+    if cfg.veto_release_ms:
+        veto = _release(veto, 40.0 / (cfg.veto_release_ms / 1000.0 * cfg.frame_rate))
+    return p * veto
+
+
+def _release(x, db_per_frame):
+    """Let `x` fall no faster than `db_per_frame`; rises pass through at once.
+
+    A peak follower with exponential decay, so a fall is linear in dB.
+    """
+    decay = 10 ** (-db_per_frame / 20.0)
+    out = np.array(x, dtype=np.float64)
+    for t in range(1, len(out)):
+        held = out[t - 1] * decay
+        if held > out[t]:
+            out[t] = held
+    return out
 
 
 def ambience_spectrum(track, levels, cfg, seconds=20.0):

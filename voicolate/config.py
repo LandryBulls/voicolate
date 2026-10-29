@@ -59,6 +59,11 @@ class IsolationConfig:
     # behaviour, which let a listener's backchannel open their gate over half a
     # second of the speaker's audio on either side of it. See `speech_presence`.
     hangover_respects_dominance: bool = True
+    # Time the veto above takes to fade the gate by 40 dB (linear in dB); it lifts
+    # instantly. None closes in a frame or two, the 2026-09-24 behaviour, which
+    # cut the target off like a switch whenever another person started talking
+    # inside their hangover. See `speech_presence`.
+    veto_release_ms: float = 100.0
     # Hard limit on total attenuation; never silence. This is a guardrail against
     # the v2 failure (an unbounded gate destroying the target's own quiet speech),
     # not a judgement about how loud bleed may be -- and it only binds once the

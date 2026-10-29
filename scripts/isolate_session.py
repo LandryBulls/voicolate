@@ -123,6 +123,9 @@ def add_config_args(p):
                    help="let the presence hangover overrule live dominance evidence "
                         "(pre-2026-09 behaviour; a listener's backchannel then opens "
                         "their gate over the speaker either side of it)")
+    p.add_argument('--veto-release-ms', type=float, default=None,
+                   help='time the hangover veto takes to fade the gate by 40 dB '
+                        '(default 100; 0 cuts in a frame or two, the 2026-09-24 behaviour)')
     p.add_argument('--presence-snr-db', type=float, default=None,
                    help='dB above a track\'s own noise floor for speech presence')
     p.add_argument('--residual-noise-over-db', type=float, default=None,

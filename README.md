@@ -68,7 +68,8 @@ in handling the frames where it is not.
 3. **Speech presence.** A per-frame probability combining dominance across the array
    with level above *that track's own noise floor*, with a symmetric hangover that
    may restore a frame the level test lost but may not overrule live dominance
-   evidence (`hangover_respects_dominance`).
+   evidence (`hangover_respects_dominance`). That veto lifts at once but closes at a
+   fixed rate (`veto_release_ms`), so it fades rather than cuts.
 4. **Suppression.** Bounded by `residual_floor_db`, so nothing is ever destroyed.
 
 Processing is blocked, so peak memory does not depend on session length or on the
@@ -150,6 +151,30 @@ Clear speech is untouched; the cost falls entirely on frames where two microphon
 genuinely within a few dB, which is real simultaneous speech rather than bleed. Note
 the bleed row now sits *at* the -40 dB floor, so from here the floor is the binding
 constraint again and lowering it does something -- which it did not before.
+
+**The veto, as a switch.** Applied frame by frame, that veto took the gate from open
+to the floor in one or two 11.6 ms frames whenever somebody else started talking
+inside a track's hangover -- audibly cutting the end of the target's own speech.
+`veto_release_ms` limits how fast it may close (40 dB per 100 ms by default) while
+still letting it lift at once. Gain by frame class pooled over all four tracks of
+2023-09-21_000, measured on the presence decision alone (the mask does not depend
+on it); "sharp cuts" counts falls of more than 20 dB within ~35 ms from an open gate:
+
+| frame class | n | frame by frame | 100 ms release |
+|---|---|---|---|
+| target leads >6 dB (clear speech) | 126434 | -0.1 dB | -0.1 dB |
+| within +/-3 dB (genuine overlap) | 29050 | -7.8 dB | -7.6 dB |
+| target trails 3-10 dB | 51613 | -23.8 dB | -22.1 dB |
+| target trails >10 dB (bleed), mean | 385194 | -38.9 dB | -37.1 dB |
+| target trails >10 dB (bleed), median | 385194 | -39.9 dB | -39.6 dB |
+| sharp cuts | | 2703 | 13 |
+
+On 2024-05-22_000, 2024-09-27_000 and 2023-10-03_003 the release takes sharp cuts
+from 2192-3921 to 31-33, costs 1.9-3.0 dB on the bleed mean and at most 0.3 dB on its
+median, and leaves clear speech untouched.
+The bleed's median barely moves; its mean moves because the release lets the first
+~100 ms of each turn through at a falling level. 50 ms leaves most cuts in place
+(1823); 250 ms costs 4.6 dB on the bleed mean.
 
 After v3, what survives suppression is quiet but structurally intact, and audible on
 close listening. Whether that matters was measured rather than assumed, with WhisperX
